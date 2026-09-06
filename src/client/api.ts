@@ -72,7 +72,8 @@ export function createQuoteApi(base = '/dsh-quote/api'): QuoteApi {
       return parsed.quote
     },
     remove: async (sessionId, quoteId) => {
-      const parsed = await request<{ ok: boolean }>(base, 'DELETE', `/quotes?sessionId=${enc(sessionId)}`, { id: quoteId })
+      // DELETE carries no JSON body; the quote id travels as a query parameter.
+      const parsed = await request<{ ok: boolean }>(base, 'DELETE', `/quotes?sessionId=${enc(sessionId)}&quoteId=${enc(quoteId)}`)
       return parsed.ok
     },
   }

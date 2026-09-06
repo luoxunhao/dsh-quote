@@ -1,25 +1,26 @@
 /**
  * dsh-quote client half: registers a session-scoped entry into the
- * `conversation.composer.dock` slot that hosts the select→quote affordance
- * (see quote-dock.tsx).
+ * `conversation.input.dock` slot that hosts the select→quote affordance and the
+ * pending-quote chips INSIDE the composer input area (see quote-dock.tsx).
  *
- * The slot key lives in `@deepseek-ai/dsh-client-ui-conversation`; the entry's
- * session standard props carry `useChat` (chat) and `sessionId` (ui-session).
- * The client bundle cannot value-import those packages (client purity gate),
- * so registration reaches the runtime `slots` service through a structurally
- * declared context face — the same pattern the sibling plugins use.
+ * `conversation.input.dock` is a session-scoped slot rendered inside the input
+ * zone (owner InputZone), so the quote chips appear within the composer rather
+ * than as a raw strip below it. The entry also attaches document-level
+ * selection listeners (for the floating 「添加到对话」button) — a session-mounted
+ * dock is a stable anchor for those. The bundle cannot value-import the
+ * conversation package (client purity gate), so registration reaches the
+ * runtime `slots` service through a structural context face.
  *
- * Registration is scoped per session via `ctx.slots.inject(slot, cb)`, which
- * the framework wires to the current session's seat so the entry component
- * receives that session's standard props. Failure policy: registration problems
- * are logged, never thrown — an external plugin must not take the GUI down.
+ * Failure policy: registration/style problems are logged, never thrown — an
+ * external plugin must not take the GUI down.
  * @module dsh-quote/client/index
  */
 
 import { QuoteDock } from './quote-dock.tsx'
+import { injectStyles } from './styles.ts'
 
-/** The composer-dock slot key (declared by the conversation plugin). */
-const COMPOSER_DOCK_SLOT = 'conversation.composer.dock'
+/** The slot key rendered inside the composer input zone. */
+const INPUT_DOCK_SLOT = 'conversation.input.dock'
 
 /** Registration options for a list slot (subset the dock needs). */
 export interface SlotRegisterOptions {
@@ -48,6 +49,9 @@ let claimed = false
 /** Services required before mounting (the slots service). */
 export const inject = ['slots']
 
+/** Plugin identity for the client module table. */
+export const name = 'dsh-quote'
+
 /**
  * Client plugin body.
  * @param ctx - the client cordis context (slots).
@@ -57,13 +61,18 @@ export function apply(ctx: ClientContext): void {
   claimed = true
   ctx.effect(() => () => { claimed = false }, 'dsh-quote: apply claim')
 
+  try { ctx.effect(injectStyles, 'dsh-quote: styles') } catch (error) {
+    console.error('[dsh-quote] style injection failed:', error)
+  }
+
   try {
-    // Scope the registration into the composer.dock slot for the active session.
-    ctx.slots.inject(COMPOSER_DOCK_SLOT, () => ctx.slots.register(
-      { name: COMPOSER_DOCK_SLOT, id: 'quote', order: 0 },
+    // Scope the registration into the input.dock slot for the active session,
+    // so the quote chips render inside the composer input area.
+    ctx.slots.inject(INPUT_DOCK_SLOT, () => ctx.slots.register(
+      { name: INPUT_DOCK_SLOT, id: 'quote', order: 0 },
       QuoteDock,
     ))
   } catch (error) {
-    console.error('[dsh-quote] composer.dock registration failed:', error)
+    console.error(`[dsh-quote] ${INPUT_DOCK_SLOT} registration failed:`, error)
   }
 }

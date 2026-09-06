@@ -96,7 +96,9 @@ export function apply(ctx: Context): void {
         return
       }
       if (url.pathname.endsWith('/quotes') && method === 'DELETE') {
-        const removed = typeof quote?.id === 'string' && store.remove(sessionId, quote.id)
+        // DELETE carries no body; the quote id travels as a query parameter.
+        const quoteId = url.searchParams.get('quoteId')
+        const removed = typeof quoteId === 'string' && quoteId !== '' && store.remove(sessionId, quoteId)
         writeJson(response, 200, { ok: removed })
         return
       }
