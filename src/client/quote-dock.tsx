@@ -1,33 +1,32 @@
 /**
- * dsh-quote composer-dock entry: the whole client affordance.
+ * dsh-quote composer-dock entry: a selection-triggered 「添加到对话」popover.
  *
  * Registered into the session-scoped slot `conversation.composer.dock`, this
- * component is mounted for the whole active session (independent of which
- * conversation view is shown). From it we attach a DOCUMENT-level `contextmenu`
- * capture listener so a right-click over the rendered chat transcript (which
- * lives outside the composer dock) is still observed. On a non-empty text
- * selection whose target is inside an assistant message row
- * (`[data-chat-flow-key]`), we resolve the assistant node through `useChat`
- * and, if the user picks 「引用到对话」, silently queue the selection for its
- * session via the host HTTP API. While the session has pending quotes we also
- * render a quiet, removable indicator strip.
+ * component is mounted for the whole active session. From it we attach
+ * DOCUMENT-level `selectionchange` / `mouseup` listeners so that whenever the
+ * user makes a text selection over a chat message row (`[data-chat-flow-key]`),
+ * a small floating 「添加到对话」button appears anchored at the selection's end.
+ * Clicking it silently queues the selected text for the session via the host
+ * HTTP API; while the session has pending quotes a quiet, removable indicator
+ * strip also renders below the composer.
  *
- * Failure policy: DOM/API problems are logged, never thrown — a plugin must
- * not take the GUI down.
+ * The component never crashes on a missing prop: DOM/API/slot problems degrade
+ * to a logged no-op, never a throw, so a host that composes differently simply
+ * shows no affordance.
  * @module dsh-quote/client/quote-dock
  */
 
 import { useEffect, useState } from 'react'
 import type { ReactElement } from 'react'
 
-import type { SessionStandardProps, GlobalStandardProps, ChatNodeStoreLike, ChatSnapshotLike } from './slot-props.ts'
+import type { ChatNodeStoreLike } from './slot-props.ts'
 import { createQuoteApi, type QuoteApi } from './api.ts'
 
 /** Selector over the chat snapshot we use to resolve a node key. */
 type ChatNodeStore = ChatNodeStoreLike
 
 const FLOW_KEY_ATTR = '[data-chat-flow-key]'
-const MENU_LABEL = '引用到对话'
+const BUTTON_LABEL = '添加到对话'
 
 /** One resolved quote candidate from a selection over a chat row. */
 export interface QuoteCandidate {
@@ -39,113 +38,145 @@ export interface QuoteCandidate {
   sourceMessageId?: string
 }
 
-export interface QuoteDockProps extends SessionStandardProps, GlobalStandardProps {
-  /** The current session id (ui-session merge). */
+/** Where the floating button should sit: viewport coords of the selection end. */
+export interface PopoverAnchor {
+  x: number
+  y: number
+}
+
+export interface QuoteDockProps {
+  /** The current session id (ui-session merge; absent only when not composed). */
   sessionId?: string
 }
 
 /**
- * Resolve a right-click over a selectable chat row into a quote candidate: the
- * non-empty selection text plus, when available, the row's source kind and its
- * finalized message id. Any text-bearing chat row may be quoted (assistant /
- * user / tool output — per the agreed "任意文字块" scope); the source message
- * id is only resolvable for settled assistant rows, whose node carries
- * `data.finalNode.messageId`.
+ * Resolve a text selection over a chat row into a quote candidate: the selected
+ * text plus, when resolvable, its row kind and finalized message id. Returns
+ * undefined when the selection is empty or its anchor is not inside a chat flow
+ * row (`[data-chat-flow-key]`).
  *
- * Returns undefined when the selection is empty or the target is not inside a
- * chat flow row (`[data-chat-flow-key]`).
+ * The selection is read from the live `window` selection (rendered text, verbatim
+ * — per ADR-0001 we ingest what the user sees, not reconstructed markdown).
  * @param selectionText - the current window selection text.
- * @param target - the contextmenu event target (an Element).
- * @param nodes - the chat node store (`useChat((s) => s.nodes)`).
+ * @param anchorNode - the selection's anchor Node (an Element ancestor is walked).
+ * @param nodes - the chat node store (`useChat((s) => s.nodes)`), optional.
  */
-export function quoteFromChatRow(
+export function quoteFromSelection(
   selectionText: string,
-  target: Element | null,
-  nodes: ChatNodeStore,
+  anchorNode: Node | null,
+  nodes?: ChatNodeStore,
 ): QuoteCandidate | undefined {
   const text = selectionText.trim()
   if (text === '') return undefined
-  const row = target?.closest(FLOW_KEY_ATTR)
+  if (!(anchorNode instanceof Node)) return undefined
+  const row = anchorNode.parentElement?.closest(FLOW_KEY_ATTR) ?? (
+    anchorNode instanceof Element ? anchorNode.closest(FLOW_KEY_ATTR) : null
+  )
   if (!(row instanceof HTMLElement)) return undefined
   const key = row.dataset.chatFlowKey
-  if (key === undefined) return undefined
   const kind = row.dataset.chatFlowKind
-  const node = nodes.get(key) as
-    | { data?: { status?: string; finalNode?: { messageId?: string } } }
-    | undefined
   const candidate: QuoteCandidate = { text }
   if (kind !== undefined && kind !== '') candidate.sourceKind = kind
-  const messageId = node?.data?.finalNode?.messageId
-  if (messageId !== undefined) candidate.sourceMessageId = messageId
+  if (nodes !== undefined && key !== undefined) {
+    const node = nodes.get(key) as
+      | { data?: { status?: string; finalNode?: { messageId?: string } } }
+      | undefined
+    const messageId = node?.data?.finalNode?.messageId
+    if (messageId !== undefined) candidate.sourceMessageId = messageId
+  }
   return candidate
 }
 
-/** A component-safe window selection read. */
-function currentSelection(): string {
+/** The viewport rect at the END of the current selection (for anchoring the button). */
+export function selectionAnchorRect(): PopoverAnchor | undefined {
   const selection = window.getSelection?.()
-  return selection ? selection.toString() : ''
+  if (selection == null || selection.rangeCount === 0 || selection.isCollapsed) return undefined
+  const range = selection.getRangeAt(selection.rangeCount - 1).cloneRange()
+  range.collapse(false) // collapse to the selection END (caret after the selected text)
+  const rect = range.getBoundingClientRect()
+  if (rect.width === 0 && rect.height === 0) {
+    // Fallback: no usable rect from the collapsed range; use the selection text rect.
+    const all = selection.getRangeAt(0).getBoundingClientRect()
+    return { x: all.right, y: all.bottom }
+  }
+  return { x: rect.left, y: rect.bottom }
+}
+
+/** A component-safe window selection read. */
+function currentSelection(): { text: string; anchorNode: Node | null } {
+  const selection = window.getSelection?.()
+  if (selection == null || selection.rangeCount === 0) return { text: '', anchorNode: null }
+  const anchor = selection.anchorNode
+  return { text: selection.toString(), anchorNode: anchor instanceof Node ? anchor : null }
 }
 
 /**
- * The composer.dock entry: hosts the document-level context-menu listener, the
- * 「引用到对话」menu, and the pending-quote indicator strip for this session.
- * @param props - session standard props (useChat) + the current session id.
+ * The composer.dock entry: hosts the selection listeners, the floating
+ * 「添加到对话」button, and the pending-quote indicator strip for this session.
+ *
+ * Deliberately does NOT read `useChat`/other standard props: like sibling dock
+ * entries it is behavior-only over the DOM, so a host that composes different
+ * standard props still works. The quote carries the verbatim selected text and
+ * its row kind; the durable messageId is a nice-to-have we forgo to stay
+ * dependency-free.
+ * @param props - session standard props; only `sessionId` is read.
  */
 export function QuoteDock(props: QuoteDockProps): ReactElement | null {
-  const { useChat, sessionId } = props
-  const [menu, setMenu] = useState<{ x: number; y: number; candidate: QuoteCandidate } | null>(null)
+  const sessionId = (props as { sessionId?: string }).sessionId
+  const [offer, setOffer] = useState<{ anchor: PopoverAnchor; candidate: QuoteCandidate } | null>(null)
   const [pending, setPending] = useState<readonly { id: string; text: string }[]>([])
   const api = createQuoteApi()
-  const nodes = useChat((s: ChatSnapshotLike) => s.nodes)
 
-  /** Refresh the session's pending quotes (only when there is a live session). */
-  const refreshPending = (sid: string | undefined, client: QuoteApi): void => {
+  /** Refresh the session's pending quotes. */
+  const refreshPending = (sid: string | undefined): void => {
     if (sid === undefined) return
-    client.list(sid).then(
+    api.list(sid).then(
       (list) => setPending(list),
       (error) => console.warn('[dsh-quote] list pending failed:', error),
     )
   }
 
-  // Keep the pending indicator in sync with the host queue. There is no push
-  // channel from host to this dock, so a light poll (only while mounted and only
-  // when there is a live session) both seeds the strip on mount and clears it
-  // shortly after a real send makes the host fold consume the quotes.
+  // Keep the pending indicator in sync with the host queue (host fold consumes
+  // quotes on send; no push channel exists, so a light poll clears it shortly after).
   useEffect(() => {
     if (sessionId === undefined) return undefined
-    refreshPending(sessionId, api)
-    const timer = window.setInterval(() => refreshPending(sessionId, api), 2000)
+    refreshPending(sessionId)
+    const timer = window.setInterval(() => refreshPending(sessionId), 2000)
     return () => window.clearInterval(timer)
   }, [sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Offer the 「添加到对话」button when a text selection is made over a chat row.
   useEffect(() => {
-    if (document === undefined) return
-    const onContextMenu = (event: MouseEvent): void => {
-      const target = event.target instanceof Element ? event.target : null
-      const candidate = quoteFromChatRow(currentSelection(), target, nodes)
-      if (candidate === undefined) return
-      event.preventDefault()
-      setMenu({ x: event.clientX, y: event.clientY, candidate })
+    if (typeof document === 'undefined') return
+    const maybeOffer = (): void => {
+      try {
+        const { text, anchorNode } = currentSelection()
+        const candidate = quoteFromSelection(text, anchorNode)
+        const anchor = selectionAnchorRect()
+        if (candidate === undefined || anchor === undefined) { setOffer(null); return }
+        setOffer({ anchor, candidate })
+      } catch {
+        setOffer(null)
+      }
     }
-    const onClose = (): void => setMenu(null)
-    document.addEventListener('contextmenu', onContextMenu, true)
-    document.addEventListener('click', onClose)
-    document.addEventListener('scroll', onClose, true)
+    document.addEventListener('mouseup', maybeOffer)
+    document.addEventListener('selectionchange', maybeOffer)
+    document.addEventListener('scroll', () => setOffer(null), true)
     return () => {
-      document.removeEventListener('contextmenu', onContextMenu, true)
-      document.removeEventListener('click', onClose)
-      document.removeEventListener('scroll', onClose, true)
+      document.removeEventListener('mouseup', maybeOffer)
+      document.removeEventListener('selectionchange', maybeOffer)
+      document.removeEventListener('scroll', () => setOffer(null), true)
     }
-  }, [nodes, sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const addQuote = (candidate: QuoteCandidate): void => {
-    setMenu(null)
+    setOffer(null)
     if (sessionId === undefined) {
       console.warn('[dsh-quote] no session id; cannot queue quote')
       return
     }
     api.add(sessionId, candidate).then(
-      () => refreshPending(sessionId, api),
+      () => refreshPending(sessionId),
       (error) => console.warn('[dsh-quote] queue quote failed:', error),
     )
   }
@@ -153,23 +184,26 @@ export function QuoteDock(props: QuoteDockProps): ReactElement | null {
   const removeQuote = (quoteId: string): void => {
     if (sessionId === undefined) return
     api.remove(sessionId, quoteId).then(
-      () => refreshPending(sessionId, api),
+      () => refreshPending(sessionId),
       (error) => console.warn('[dsh-quote] remove quote failed:', error),
     )
   }
 
   return (
     <>
-      {menu !== null && (
+      {offer !== null && (
         <div
-          data-dsh-quote-menu=""
-          role="menu"
-          className="dsh-quote-menu"
-          style={{ position: 'fixed', left: menu.x, top: menu.y, zIndex: 9999 }}
-          onClick={(event) => { event.stopPropagation() }}
+          data-dsh-quote-offer=""
+          className="dsh-quote-offer"
+          style={{ position: 'fixed', left: offer.anchor.x, top: offer.anchor.y, zIndex: 9999 }}
         >
-          <button type="button" role="menuitem" onClick={() => addQuote(menu.candidate)}>
-            {MENU_LABEL}
+          <button
+            type="button"
+            className="dsh-quote-offer-button"
+            onClick={() => addQuote(offer.candidate)}
+            onMouseDown={(event) => event.preventDefault()}
+          >
+            {BUTTON_LABEL}
           </button>
         </div>
       )}
