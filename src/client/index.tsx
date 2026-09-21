@@ -1,15 +1,18 @@
 /**
  * dsh-quote client half: registers a session-scoped entry into the
- * `conversation.input.dock` slot that hosts the select→quote affordance and the
- * pending-quote chips INSIDE the composer input area (see quote-dock.tsx).
+ * `conversation.input.overlay` slot that hosts the select→quote menu and the
+ * pending-quote cards INSIDE the composer card (see quote-dock.tsx).
  *
- * `conversation.input.dock` is a session-scoped slot rendered inside the input
- * zone (owner InputZone), so the quote chips appear within the composer rather
- * than as a raw strip below it. The entry also attaches document-level
- * selection listeners (for the floating 「添加到对话」button) — a session-mounted
- * dock is a stable anchor for those. The bundle cannot value-import the
- * conversation package (client purity gate), so registration reaches the
- * runtime `slots` service through a structural context face.
+ * `conversation.input.overlay` is a session-scoped list slot rendered inside the
+ * resident composer card's own attachment area, so the quote cards appear above
+ * the draft text the way a pasted image does. `conversation.input.dock` is not
+ * that: it renders full-width entries *above* the composer card. The card's
+ * attachment slot is a single slot already taken by the host's image rail. The
+ * entry also attaches document-level selection listeners (for the floating
+ * selection menu) — a session-mounted overlay is a stable anchor for those. The
+ * bundle cannot value-import the conversation package (client purity gate), so
+ * registration reaches the runtime `slots` service through a structural context
+ * face.
  *
  * Failure policy: registration/style problems are logged, never thrown — an
  * external plugin must not take the GUI down.
@@ -19,8 +22,8 @@
 import { QuoteDock } from './quote-dock.tsx'
 import { injectStyles } from './styles.ts'
 
-/** The slot key rendered inside the composer input zone. */
-const INPUT_DOCK_SLOT = 'conversation.input.dock'
+/** The slot key rendered inside the resident composer card. */
+const INPUT_OVERLAY_SLOT = 'conversation.input.overlay'
 
 /** Registration options for a list slot (subset the dock needs). */
 export interface SlotRegisterOptions {
@@ -66,13 +69,13 @@ export function apply(ctx: ClientContext): void {
   }
 
   try {
-    // Scope the registration into the input.dock slot for the active session,
-    // so the quote chips render inside the composer input area.
-    ctx.slots.inject(INPUT_DOCK_SLOT, () => ctx.slots.register(
-      { name: INPUT_DOCK_SLOT, id: 'quote', order: 0 },
+    // Scope the registration into the input.overlay slot for the active session,
+    // so the quote cards render inside the composer card.
+    ctx.slots.inject(INPUT_OVERLAY_SLOT, () => ctx.slots.register(
+      { name: INPUT_OVERLAY_SLOT, id: 'quote', order: 0 },
       QuoteDock,
     ))
   } catch (error) {
-    console.error(`[dsh-quote] ${INPUT_DOCK_SLOT} registration failed:`, error)
+    console.error(`[dsh-quote] ${INPUT_OVERLAY_SLOT} registration failed:`, error)
   }
 }

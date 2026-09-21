@@ -2,7 +2,7 @@
 
 **DSH 极简插件：把对话里选中的一段文字，作为「注入上下文」随下一条消息喂给模型，方便接着它继续提问。**
 
-选中任意文字块（assistant / 你自己 / tool 输出）→ 右键 →「引用到对话」→ 那段作为注入上下文，只在你**下一次发送的真实用户消息**时生效一次，用完即走，**不进你消息正文**。
+选中任意文字块（assistant / 你自己 / tool 输出）→ 松手弹出菜单 →「添加到对话」→ 那段作为注入上下文，只在你**下一次发送的真实用户消息**时生效一次，用完即走，**不进你消息正文**。
 
 ## 为什么是这样（简短）
 
@@ -12,10 +12,10 @@
 ## 行为（确认稿）
 
 - 来源范围：任意文字块（不限 assistant / 自己 / tool）
-- 触发：划选后右键菜单「引用到对话」
-- 落点：排一条"待生效引用"；发送前有低调提示条、可移除
+- 触发：划选松手后在选区上方弹出胶囊菜单「复制文本 / 添加到对话」
+- 落点：排一条"待生效引用"；每条以附件卡片显示在输入框卡片内（引文 + 来源行类型），可移除
 - 语义：一次性、对下一条真实用户消息注入、随即清除；不跨会话、不持久化
-- 命名：`dsh-quote`，右键文案「引用到对话」
+- 命名：`dsh-quote`，菜单文案「添加到对话」
 
 ## 词汇与决策
 
@@ -24,9 +24,9 @@
 
 ## 技术落点（已实现）
 
-- **client 挂载点**：会话级 slot `conversation.composer.dock`（`src/client/index.tsx` 注册 `QuoteDock`）。
-- **选区捕获**：文档层 `contextmenu` 捕获监听；选区非空且命中 `[data-chat-flow-key]` 时 → `window.getSelection().toString()` + `useChat` 解析来源 `messageId`（`src/client/quote-dock.tsx`）。
-- **静默入队 / 待生效提示条**：`QuoteDock` 经自有 HTTP API（`src/client/api.ts`）把引文交给 host；有 ≥1 条待生效引用时显示低调、可移除的提示条。
+- **client 挂载点**：会话级 slot `conversation.input.overlay`（`src/client/index.tsx` 注册 `QuoteDock`）。该槽渲染在 composer 卡片内部顶端的零高锚点上，所以引用卡片能像附件一样压在输入框里；`conversation.input.dock` 是卡片**上方**的全宽槽位，`conversation.input.attachments` 是被官方图片附件占用的 single 槽，两者都不合适。
+- **选区捕获**：文档层 `mouseup` 捕获监听（`selectionchange` / `scroll` 只负责收起）；选区非空且命中 `[data-chat-flow-key]` 时 → `window.getSelection().toString()` + 行 `data-chat-flow-kind`（`src/client/quote-dock.tsx`）。
+- **静默入队 / 引用卡片**：`QuoteDock` 经自有 HTTP API（`src/client/api.ts`）把引文交给 host；每条待生效引用渲染为一张附件卡片（`data-dsh-quote-rail`），卡片副标题是来源行类型，hover 出移除按钮。
 - **注入**：host 端（`src/index.ts`）`agent/pre-step` 一次性折叠（`src/quote-fold.ts`），仅跟随真实用户回合，注入后清空（`src/quote-store.ts`）；注入消息带 plugin source（`src/quote-context.ts`）。
 
 ## 安装 / 挂载

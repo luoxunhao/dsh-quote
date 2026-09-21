@@ -2,88 +2,160 @@
  * dsh-quote client styles: injected once as a `<style data-plugin-css="dsh-quote">`
  * tag. Colors ride the dsh `--dsw-*` tokens so the affordance follows the
  * active theme. Attribute-scoped so nothing leaks into the rest of the GUI.
+ *
+ * The pending-quote rail is contributed to `conversation.input.overlay`, whose
+ * anchor is a zero-height absolutely positioned box at the top of the composer
+ * card. The rail therefore positions itself against that anchor and opens up
+ * room in the card with a `:has()` guard, so the draft text is pushed below the
+ * cards instead of being covered by them.
  * @module dsh-quote/client/styles
  */
 
 const TAG_ID = 'dsh-quote'
 
+/** Chip height, mirrored by the composer card's top padding below. */
+const CARD_HEIGHT = 44
+/** Gap between the card's top edge and the rail, and between the rail and the text. */
+const RAIL_INSET = 8
+/** Horizontal inset matching the composer's own text padding. */
+const RAIL_SIDE_INSET = 14
+
 const CSS = `
-/* Floating 「添加到对话」offer button shown at the selection end. */
+/* Selection menu: one pill holding 「复制文本」 and 「添加到对话」. */
 [data-dsh-quote-offer] {
-  display: block;
-}
-[data-dsh-quote-offer] .dsh-quote-offer-button {
-  padding: 4px 10px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
   border: 1px solid var(--dsw-alias-border-l2, #3a3a3a);
   border-radius: 999px;
   background: var(--dsw-alias-bg-base);
   color: var(--dsw-alias-label-primary);
   font-size: 12px;
   line-height: 1.4;
-  cursor: pointer;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22);
+  box-shadow: var(--dsw-elevation-soft, 0 4px 14px rgba(0, 0, 0, 0.22));
   white-space: nowrap;
+  transform: translate(-50%, -100%);
 }
-[data-dsh-quote-offer] .dsh-quote-offer-button:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
+[data-dsh-quote-offer][data-placement="below"] {
+  transform: translate(-50%, 0);
 }
-
-/* Pending-quote chips rendered INSIDE the composer input area.
-   Compact horizontal chips (max width/height controlled, ellipsis on long
-   text) so a queued quote reads as part of the input, not a raw block below. */
-[data-dsh-quote-pending] {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  max-height: 96px;
-  overflow-y: auto;
-  padding: 4px 10px;
-}
-[data-dsh-quote-pending] .dsh-quote-pending-label {
-  flex: none;
-  font-size: 11px;
-  color: var(--dsw-alias-label-tertiary);
-  white-space: nowrap;
-  user-select: none;
-}
-[data-dsh-quote-pending] .dsh-quote-pending-item {
+[data-dsh-quote-offer] .dsh-quote-offer-item {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  max-width: 240px;
-  height: 24px;
-  padding: 0 4px 0 10px;
-  border: 1px solid var(--dsw-alias-border-l2, #3a3a3a);
+  gap: 6px;
+  padding: 5px 10px;
+  border: none;
   border-radius: 999px;
-  background: var(--dsw-alias-bg-layer-2, rgba(128, 128, 128, 0.1));
+  background: transparent;
   color: var(--dsw-alias-label-secondary);
-  font-size: 12px;
+  font: inherit;
+  cursor: pointer;
+}
+[data-dsh-quote-offer] .dsh-quote-offer-item:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+[data-dsh-quote-offer] .dsh-quote-offer-sep {
+  flex: none;
+  width: 1px;
+  height: 16px;
+  background: var(--dsw-alias-border-l2, #3a3a3a);
+}
+[data-dsh-quote-offer] .dsh-quote-glyph {
+  flex: none;
+}
+
+/* Pending-quote rail pinned to the top of the composer card. */
+[data-dsh-quote-rail] {
+  position: absolute;
+  top: ${RAIL_INSET}px;
+  left: ${RAIL_SIDE_INSET}px;
+  right: ${RAIL_SIDE_INSET}px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+[data-dsh-quote-rail]::-webkit-scrollbar {
+  display: none;
+}
+/* Room for the rail, only while the rail is actually mounted. */
+[data-composer-card]:has([data-dsh-quote-rail]) {
+  padding-top: ${RAIL_INSET + CARD_HEIGHT + RAIL_INSET}px;
+}
+
+/* One quote as an attachment card: glyph, quote, source row. */
+[data-dsh-quote-rail] .dsh-quote-card {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 260px;
+  height: ${CARD_HEIGHT}px;
+  padding: 0 8px;
+  border: 1px solid var(--dsw-alias-border-l2, #3a3a3a);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-base);
   overflow: hidden;
 }
-[data-dsh-quote-pending] .dsh-quote-pending-text {
-  max-width: 180px;
+[data-dsh-quote-rail] .dsh-quote-card-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-2, rgba(128, 128, 128, 0.14));
+  color: var(--dsw-alias-label-secondary);
+}
+[data-dsh-quote-rail] .dsh-quote-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+[data-dsh-quote-rail] .dsh-quote-card-title {
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-[data-dsh-quote-pending] .dsh-quote-pending-item button {
+[data-dsh-quote-rail] .dsh-quote-card-sub {
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--dsw-alias-label-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+[data-dsh-quote-rail] .dsh-quote-card-remove {
   flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   padding: 0;
   border: none;
   border-radius: 50%;
   background: transparent;
   color: var(--dsw-alias-label-tertiary);
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1;
   cursor: pointer;
+  opacity: 0;
 }
-[data-dsh-quote-pending] .dsh-quote-pending-item button:hover {
+[data-dsh-quote-rail] .dsh-quote-card:hover .dsh-quote-card-remove,
+[data-dsh-quote-rail] .dsh-quote-card-remove:focus-visible {
+  opacity: 1;
+}
+[data-dsh-quote-rail] .dsh-quote-card-remove:hover {
   background: var(--dsw-alias-bg-layer-2, rgba(128, 128, 128, 0.2));
   color: var(--dsw-alias-label-primary);
 }
