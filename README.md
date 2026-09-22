@@ -43,8 +43,10 @@ dsh plugin --profile <name> add <dsh-quote 本地路径或包名>
 pnpm typecheck
 pnpm build
 pnpm test
+pnpm verify   # typecheck + test + 安装面校验（pnpm pack 后装进一次性 pnpm 工程）
 ```
 
 **架构约束**：
 - client bundle 禁止 value-import 其他 `@deepseek-ai` 模块（client 纯度门）；与 DSH 交互只走公开 slot / 自有 HTTP 桥。
+- **宿主自带的包只能是 `peerDependencies`，绝不能进 `dependencies`**。profile 是独立的 hoisted pnpm 工程，而宿主自己的包在全局 `dsh` 那棵树里，插件往上找 `node_modules` 走不到——声明成 `dependencies` 就会被就地再装一份，插件的裸 import 绑到第二份实例上。表现是 profile 照常启动、**每条对话在第一次工具调用处静默死掉**，日志里没有"模块重复"提示。`link:` 安装只放软链所以看不出问题，`file:<tgz>`（桌面分发用的形态）才会暴露；唯一例外是插件要 spawn 成独立进程用的包。`pnpm verify` 与 `tests/dependency-face.spec.ts` 双向拦住这个回归。
 - 引文 = 注入上下文（不进 user 消息正文）、双面 host + client——不可逆取舍见 `docs/adr/0001-quote-as-injected-context.md`。

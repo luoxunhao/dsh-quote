@@ -99,6 +99,11 @@ export default [
     fixedExtension: false,
     dts: false,
     clean: false,
+    // The host owns these trees and reads the plugin's contributions through its
+    // own Symbols and classes, so they resolve through the loader at runtime.
+    // Bundling one in copies the host's classes and breaks `instanceof` across
+    // the two, which no manifest entry can be mis-declared past.
+    external: [/^@deepseek-ai\//, /^cordis/, /^react/],
   },
   clientBundle(),
 ] satisfies UserConfig[]
