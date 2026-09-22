@@ -22,6 +22,7 @@ import type { ReactElement } from 'react'
 
 import type { ChatNodeStoreLike } from './slot-props.ts'
 import { createQuoteApi, type QuoteApi } from './api.ts'
+import { attachQuoteContextRowMarker } from './context-rows.ts'
 
 /** Selector over the chat snapshot we use to resolve a node key. */
 type ChatNodeStore = ChatNodeStoreLike
@@ -307,6 +308,19 @@ export function QuoteDock(props: QuoteDockProps): ReactElement | null {
       document.removeEventListener('mouseup', maybeOffer)
       document.removeEventListener('selectionchange', dismiss)
       document.removeEventListener('scroll', dismiss, true)
+    }
+  }, [])
+
+  // Mark this plugin's injected-context rows in the transcript so the
+  // stylesheet can render them as cards. The host gives a collapsed row no
+  // producer attribute, and it keeps rendering the row either way.
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined
+    try {
+      return attachQuoteContextRowMarker(document.body)
+    } catch (error) {
+      console.warn('[dsh-quote] context row marker failed:', error)
+      return undefined
     }
   }, [])
 

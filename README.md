@@ -28,6 +28,7 @@
 - **选区捕获**：文档层 `mouseup` 捕获监听（`selectionchange` / `scroll` 只负责收起）；选区非空且命中 `[data-chat-flow-key]` 时 → `window.getSelection().toString()` + 行 `data-chat-flow-kind`（`src/client/quote-dock.tsx`）。
 - **静默入队 / 引用卡片**：`QuoteDock` 经自有 HTTP API（`src/client/api.ts`）把引文交给 host；每条待生效引用渲染为一张附件卡片（`data-dsh-quote-rail`），卡片副标题是来源行类型，hover 出移除按钮。
 - **注入**：host 端（`src/index.ts`）`agent/pre-step` 一次性折叠（`src/quote-fold.ts`），仅跟随真实用户回合，注入后清空（`src/quote-store.ts`）；注入消息带 plugin source（`src/quote-context.ts`）。
+- **转录区卡片**：注入的引文由宿主统一渲染成"上下文注入"折叠行，宿主没留按插件定制的缝——折叠行里唯一能辨出生产者的是 `[data-context-source]` 的**文本**（插件名，稳定标识）。所以 `src/client/context-rows.ts` 只给本插件的行打 `data-dsh-quote-context` 标记，CSS 仅重扮带标记的行，其余插件的注入行逐字节不变。行的位置由宿主按日志 `anchorSeq` 决定，插件改不了：转录区是一根扁平 flex 列，`order` 只会把行甩到整个会话的首尾，做不出与相邻一行交换。
 
 ## 安装 / 挂载
 
