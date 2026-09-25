@@ -1,15 +1,18 @@
 /**
  * @vitest-environment jsdom
  * dsh-quote client presentation tests: the selection-menu placement, the
- * source-row label shown on a quote chip, and the pending-quote rail markup.
- * The rail is rendered through react-dom/server so the assertions read the
+ * source-row label shown on a quote chip, the pending-quote rail markup, and
+ * the sent-quote receipt that replaces the transcript card this plugin cannot
+ * have (see docs/adr/0002-quote-visibility.md).
+ * Components render through react-dom/server so the assertions read the
  * committed DOM shape without a test-only renderer dependency.
  */
 import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createElement } from 'react'
 
-import { QuoteRail, menuPosition, sourceKindLabel } from '../src/client/quote-dock.tsx'
+import { QuoteRail, SentReceipt, menuPosition, sourceKindLabel } from '../src/client/quote-dock.tsx'
+import { formatSentAt, toSentQuoteCard } from '../src/client/sent-quotes.ts'
 
 const VIEWPORT = { width: 1200, height: 800 }
 const MENU_SIZE = { width: 160, height: 32 }
@@ -95,5 +98,80 @@ describe('QuoteRail', () => {
   it('labels an unattributed quote as selected text', () => {
     const html = renderToStaticMarkup(createElement(QuoteRail, { quotes: [{ id: 'q3', text: 'x' }], onRemove: () => {} }))
     expect(html).toContain('选中的文本')
+  })
+
+  it('explains that a quote cannot go out while a turn is running', () => {
+    // The mid-turn state is where a staged quote looks stalled but is in fact
+    // waiting on the agent (ADR-0002).
+    const html = renderToStaticMarkup(createElement(QuoteRail, {
+      quotes: [{ id: 'q4', text: '等待中的引文', sourceKind: 'assistant' }],
+      onRemove: () => {},
+      busy: true,
+    }))
+    expect(html).toContain('回合进行中，稍后随你的消息发出')
+    expect(html).not.toContain('助手消息')
+  })
+
+  it('shows the source label, not a hint, when nothing is running', () => {
+    const html = renderToStaticMarkup(createElement(QuoteRail, {
+      quotes: [{ id: 'q5', text: 'x', sourceKind: 'assistant-step' }],
+      onRemove: () => {},
+      busy: false,
+    }))
+    expect(html).toContain('助手消息')
+  })
+})
+
+describe('SentReceipt', () => {
+  const cards = [
+    { id: 'q1', text: '已经发出去的引文', source: '助手消息', when: '14:05', sentAt: 0 },
+  ]
+
+  it('renders nothing before anything has been sent', () => {
+    expect(renderToStaticMarkup(createElement(SentReceipt, { quotes: [], onDismiss: () => {} }))).toBe('')
+  })
+
+  it('shows the quote, its source, and its send time', () => {
+    const html = renderToStaticMarkup(createElement(SentReceipt, { quotes: cards, onDismiss: () => {} }))
+    expect(html).toContain('data-dsh-quote-receipt=""')
+    expect(html).toContain('data-quote-id="q1"')
+    expect(html).toContain('已经发出去的引文')
+    expect(html).toContain('助手消息 · 14:05')
+  })
+
+  it('offers a dismissal control addressed to its own quote id', () => {
+    const html = renderToStaticMarkup(createElement(SentReceipt, { quotes: cards, onDismiss: () => {} }))
+    expect(html).toContain('aria-label="不再显示"')
+    expect(html).toContain('data-quote-dismiss="q1"')
+  })
+
+  it('omits the separator when a record carries no readable time', () => {
+    const html = renderToStaticMarkup(createElement(SentReceipt, {
+      quotes: [{ id: 'q2', text: 'x', source: '用户消息', when: '', sentAt: 0 }],
+      onDismiss: () => {},
+    }))
+    expect(html).toContain('用户消息')
+    expect(html).not.toContain('·')
+  })
+})
+
+describe('toSentQuoteCard', () => {
+  it('carries the verbatim text and the caller-supplied source label', () => {
+    const card = toSentQuoteCard({ id: 'q1', text: '引文', sourceKind: 'tool', sentAt: 0 }, '工具输出')
+    expect(card.id).toBe('q1')
+    expect(card.text).toBe('引文')
+    expect(card.source).toBe('工具输出')
+  })
+})
+
+describe('formatSentAt', () => {
+  it('renders a clock reading for a real stamp', () => {
+    expect(formatSentAt(Date.UTC(2026, 0, 2, 3, 4))).toMatch(/\d{1,2}:\d{2}/)
+  })
+
+  it('degrades to an empty string instead of throwing on a bad stamp', () => {
+    expect(formatSentAt(undefined)).toBe('')
+    expect(formatSentAt(Number.NaN)).toBe('')
+    expect(formatSentAt(Number.POSITIVE_INFINITY)).toBe('')
   })
 })

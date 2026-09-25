@@ -26,6 +26,12 @@ export interface PendingQuote {
   readonly sourceMessageId?: string
   /** The source row kind the selection came from (assistant / user / tool / …). */
   readonly sourceKind?: string
+  /**
+   * Set once the user has sent the message this quote rides. A claimed quote is
+   * still queued — the fold has yet to inject it — but the composer stops showing
+   * it as a removable draft, because it belongs to a message already sent.
+   */
+  readonly claimed?: boolean
 }
 
 /** The store's observable state for one session: its pending quotes, in order. */
@@ -93,6 +99,37 @@ export class QuoteStore {
     return (this.bySession.get(sessionId)?.length ?? 0) > 0
   }
 
+  /**
+   * Mark every quote of a session as claimed by a send the user just made.
+   *
+   * A quote sits "pending" until it rides a turn. The user pressing send does not
+   * start a turn when the agent is busy — the message queues and the agent keeps
+   * working — so the quote legitimately stays pending for a long time. Claiming
+   * distinguishes "staged, not yet sent" from "sent, waiting for its turn to be
+   * picked up", which is what the composer must show differently: the first is a
+   * removable draft, the second already belongs to the outgoing message.
+   * @param sessionId - the owning session.
+   * @returns the quotes that became claimed.
+   */
+  claim(sessionId: string): readonly PendingQuote[] {
+    const list = this.bySession.get(sessionId)
+    if (list === undefined) return []
+    const claimed = list.filter(quote => quote.claimed !== true)
+    if (claimed.length === 0) return []
+    this.bySession.set(sessionId, list.map(quote => ({ ...quote, claimed: true })))
+    return claimed
+  }
+
+  /**
+   * The quotes a session must still SHOW as staged: the unclaimed ones. A claimed
+   * quote is on its way out and the composer hides it immediately.
+   * @param sessionId - the owning session.
+   * @returns the unclaimed pending quotes.
+   */
+  staged(sessionId: string): readonly PendingQuote[] {
+    return this.list(sessionId).filter(quote => quote.claimed !== true)
+  }
+
   /** Snapshot state for one session (used to build the model-visible view). */
   state(sessionId: string): PendingQuoteState {
     return { sessionId, quotes: this.list(sessionId) }
@@ -103,5 +140,80 @@ export class QuoteStore {
     const list = this.bySession.get(sessionId) ?? []
     this.bySession.delete(sessionId)
     return list
+  }
+}
+
+/**
+ * One quote that HAS been sent, kept so the client can still show the user what
+ * rode their message.
+ *
+ * Why this exists: the shipped GUI hides every ordinary injected-context row
+ * (`ui-chat/chat-visibility.ts` keeps only system prompts out of the transcript
+ * and admits a `context` node only when it carries tool additions/removals), so
+ * an injected quote leaves no trace in the conversation the user can see. The
+ * transcript cannot be made to show it — the row is filtered before any plugin
+ * CSS or DOM marker could reach it. The affordance therefore lives where the
+ * plugin does own surface: the composer. This record is what backs that card.
+ */
+export interface SentQuote extends PendingQuote {
+  /** When the quote was consumed, as epoch ms (host clock). */
+  readonly sentAt: number
+}
+
+/** The transcript's own view of a session's sent quotes, newest last. */
+export interface SentQuoteState {
+  readonly sessionId: string
+  readonly quotes: readonly SentQuote[]
+}
+
+/** How many sent quotes a session retains for display. */
+const SENT_HISTORY_LIMIT = 20
+
+/**
+ * In-memory, per-session record of quotes already injected into the model
+ * context, so the composer can keep showing what was sent.
+ *
+ * Bounded and volatile by design: this is a display convenience, not a durable
+ * log. The authoritative record of an injected quote is the session log's
+ * `user/message` event carrying source kind `quote-context`.
+ * @class
+ */
+export class SentQuoteStore {
+  private readonly bySession = new Map<string, SentQuote[]>()
+
+  /**
+   * Record the quotes one step just injected.
+   * @param sessionId - the owning session.
+   * @param quotes - the quotes consumed by that step, in injection order.
+   * @param sentAt - epoch ms of the send, defaults to now.
+   * @returns the recorded entries.
+   */
+  record(sessionId: string, quotes: readonly PendingQuote[], sentAt = Date.now()): readonly SentQuote[] {
+    if (quotes.length === 0) return []
+    const recorded = quotes.map(quote => ({ ...quote, sentAt }))
+    const next = [...(this.bySession.get(sessionId) ?? []), ...recorded].slice(-SENT_HISTORY_LIMIT)
+    this.bySession.set(sessionId, next)
+    return recorded
+  }
+
+  /** The quotes a session has sent, oldest first. */
+  list(sessionId: string): readonly SentQuote[] {
+    return this.bySession.get(sessionId) ?? []
+  }
+
+  /** Drop one sent quote by id; true when it existed. */
+  remove(sessionId: string, quoteId: string): boolean {
+    const list = this.bySession.get(sessionId)
+    if (list === undefined) return false
+    const next = list.filter(quote => quote.id !== quoteId)
+    if (next.length === list.length) return false
+    if (next.length === 0) this.bySession.delete(sessionId)
+    else this.bySession.set(sessionId, next)
+    return true
+  }
+
+  /** Forget one session's sent history entirely. */
+  clear(sessionId: string): void {
+    this.bySession.delete(sessionId)
   }
 }

@@ -28,14 +28,31 @@ export class QuoteApiError extends Error {
   }
 }
 
+/** A quote the host already injected, as the composer shows it. */
+export interface SentQuote extends PendingQuote {
+  /** When the host consumed it, as epoch ms. */
+  readonly sentAt: number
+}
+
 /** The quotes API surface. */
 export interface QuoteApi {
-  /** List a session's pending quotes (in insertion order). */
+  /** List a session's still-staged quotes (in insertion order). */
   list(sessionId: string): Promise<readonly PendingQuote[]>
   /** Add one pending quote to a session; resolves with the stored quote. */
   add(sessionId: string, quote: { text: string; sourceMessageId?: string; sourceKind?: string }): Promise<PendingQuote>
   /** Remove one pending quote by id; true when it existed. */
   remove(sessionId: string, quoteId: string): Promise<boolean>
+  /**
+   * Tell the host the user just sent a message, so the quotes staged right now
+   * belong to it. A send made while the agent is busy starts no turn, so without
+   * this the quote stays visibly pending until the queued message is picked up.
+   * @returns how many quotes became claimed.
+   */
+  claim(sessionId: string): Promise<number>
+  /** List the quotes already injected into a session, oldest first. */
+  sent(sessionId: string): Promise<readonly SentQuote[]>
+  /** Forget one sent quote (or all of them) so it stops being shown. */
+  dismissSent(sessionId: string, quoteId?: string): Promise<boolean>
 }
 
 async function request<T>(base: string, method: string, path: string, body?: unknown): Promise<T> {
@@ -74,6 +91,16 @@ export function createQuoteApi(base = '/dsh-quote/api'): QuoteApi {
     remove: async (sessionId, quoteId) => {
       // DELETE carries no JSON body; the quote id travels as a query parameter.
       const parsed = await request<{ ok: boolean }>(base, 'DELETE', `/quotes?sessionId=${enc(sessionId)}&quoteId=${enc(quoteId)}`)
+      return parsed.ok
+    },
+    claim: async (sessionId) => {
+      const parsed = await request<{ claimed: number }>(base, 'POST', `/claim?sessionId=${enc(sessionId)}`)
+      return parsed.claimed
+    },
+    sent: async (sessionId) => (await request<{ quotes: SentQuote[] }>(base, 'GET', `/sent?sessionId=${enc(sessionId)}`)).quotes,
+    dismissSent: async (sessionId, quoteId) => {
+      const query = quoteId === undefined ? '' : `&quoteId=${enc(quoteId)}`
+      const parsed = await request<{ ok: boolean }>(base, 'DELETE', `/sent?sessionId=${enc(sessionId)}${query}`)
       return parsed.ok
     },
   }

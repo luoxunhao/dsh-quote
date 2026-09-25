@@ -51,14 +51,20 @@ export interface QuoteContextFactory<M extends MessageLike> {
   contextMessage(quote: PendingQuote): M
 }
 
-/** A store holding per-session pending quotes (the fold only needs `has`/`take`). */
+/**
+ * A store holding per-session pending quotes. The fold needs `has`/`list`/`take`
+ * rather than only a drain, so it can build the injected messages first and
+ * commit the drain only once they exist.
+ */
 export interface PendingQuoteFace {
   has(sessionId: string): boolean
+  /** The session's pending quotes, in insertion order, without removing them. */
+  list(sessionId: string): readonly PendingQuote[]
   take(sessionId: string): readonly PendingQuote[]
 }
 
 /** The host's plugin identity tag used on injected messages. */
-export const PLUGIN_NAME = 'dsh-quote'
+export { PLUGIN_NAME } from './source-kind.ts'
 
 /**
  * Whether a step's claimed messages represent a REAL user turn (the user
@@ -71,6 +77,14 @@ export const PLUGIN_NAME = 'dsh-quote'
  * none of these is the user sending fresh text, so they do not consume a
  * pending quote (per the user's Q7 decision: quotes ride the next real
  * user-text message only).
+ *
+ * Note this reads the CLAIMED slice (what the loop took from the inbox for this
+ * step). A step can run with an empty claim while its own `decision.messages`
+ * still carry content, and such a step is a continuation of work already under
+ * way, not a fresh user turn — so it correctly does not consume a quote. The
+ * fold's placement step reads `decision.messages` instead, which is a different
+ * collection; the two agree on user presence in every observed run (see
+ * ADR-0002), so gating on the claim is safe.
  * @param claimed - the messages this step claimed from the inbox.
  */
 export function isRealUserTurn(claimed: readonly MessageLike[]): boolean {
@@ -84,12 +98,17 @@ export function isRealUserTurn(claimed: readonly MessageLike[]): boolean {
  *
  * Injects ONLY when the decision enters AND the step claims a real user turn
  * AND the session currently has pending quotes. When it injects, the session's
- * queue is drained (taken) and its messages are spliced as context messages
- * right after the last claimed message. Otherwise the decision is returned
- * unchanged (a no-op).
+ * queue is drained and its messages are spliced as context messages right after
+ * the last claimed message. Otherwise the decision is returned unchanged (a
+ * no-op).
+ *
+ * All-or-nothing: every context message is built BEFORE the queue is drained, so
+ * a factory that throws leaves the quotes staged for a later turn rather than
+ * destroying them. The caller cannot recover them otherwise — its catch would
+ * swallow the error and the queue would already be empty.
  * @param decision - the decision produced by prior pre-step listeners.
  * @param claimed - the messages this step claimed from the inbox.
- * @param pending - the session's pending-quote face (has/take).
+ * @param pending - the session's pending-quote face (has/list/take).
  * @param sessionId - the owning session.
  * @param makeContext - builds a context message per pending quote.
  * @returns the (possibly rewritten) decision.
@@ -104,9 +123,15 @@ export function foldPendingQuotes<M extends MessageLike>(
   if (decision.kind !== 'enter') return decision
   if (!isRealUserTurn(claimed)) return decision
   if (!pending.has(sessionId)) return decision
-  const quotes = pending.take(sessionId)
+  // Build every context message BEFORE draining the queue. A factory that throws
+  // (a bad quote, an upstream helper rejecting the text) must not destroy quotes
+  // the user staged: draining first would empty the queue and then lose the
+  // error to the caller's catch, so the rail would clear as though the injection
+  // had succeeded. Peek, build, and only then take.
+  const quotes = pending.list(sessionId)
   if (quotes.length === 0) return decision
   const injected = quotes.map(quote => makeContext.contextMessage(quote))
+  pending.take(sessionId)
   // Insert right after the LAST genuine user-origin message in the step. We
   // locate it by SOURCE KIND, not reference identity: `claimed` (the inbox
   // slice the loop hands the listener) and the messages inside `decision.messages`

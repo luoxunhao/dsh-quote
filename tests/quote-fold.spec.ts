@@ -105,4 +105,35 @@ describe('foldPendingQuotes', () => {
     expect(out.messages[1]?.source?.kind).toBe('plugin')
     expect(out.messages[2]).toBe(inDecision[1]) // tool result preserved after
   })
+
+  // The gate reads `claimed` while placement reads `decision.messages`. A step
+  // whose claim is empty is a continuation of work already under way, NOT a
+  // fresh user turn, so it must keep the quote. This is the behaviour that made
+  // a mid-turn agent look like a stalled queue (ADR-0002): the card correctly
+  // waits, and the rail now explains that instead of sitting silent.
+  it('keeps the quote on a continuation step that claims nothing, even with a busy step', () => {
+    const pending = fakePending([{ id: 'q', text: 'must wait' }])
+    const d = enterDecision([msg('tool', 'tool-result')])
+    const out = foldPendingQuotes(d, [], pending, 's', fakeFactory)
+    expect(out).toBe(d)
+    expect(pending.has('s')).toBe(true)
+  })
+
+  it('consumes on the first step that claims a user message, however many empty claims preceded it', () => {
+    const pending = fakePending([{ id: 'q', text: 'rides the next turn' }])
+    // A long run of empty claims (a busy agent) must not drain or drop it.
+    for (let i = 0; i < 39; i += 1) {
+      const d = enterDecision([msg('tool')])
+      foldPendingQuotes(d, [], pending, 's', fakeFactory)
+    }
+    expect(pending.has('s')).toBe(true)
+
+    // Then the real user turn arrives and takes it.
+    const claimed = [msg('user')]
+    const d = enterDecision(claimed)
+    const out = foldPendingQuotes(d, claimed, pending, 's', fakeFactory)
+    if (out.kind !== 'enter') return
+    expect(out.messages.length).toBe(2)
+    expect(pending.has('s')).toBe(false)
+  })
 })
