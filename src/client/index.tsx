@@ -20,22 +20,30 @@
  */
 
 import { QuoteDock } from './quote-dock.tsx'
+import { createQuoteDefinition, QUOTE_NODE_KIND } from './quote-row.ts'
+import { QuoteRowView } from './quote-row-view.tsx'
 import { injectStyles } from './styles.ts'
+import { QUOTE_CONTEXT_KIND } from '../source-kind.ts'
 
 /** The slot key rendered inside the resident composer card. */
 const INPUT_OVERLAY_SLOT = 'conversation.input.overlay'
 
-/** Registration options for a list slot (subset the dock needs). */
+/** The keyed seat that renders one Chat node kind. */
+const CHAT_NODE_SLOT = 'conversation.chat.node'
+
+/** Registration options for a slot (subset the dock and the row need). */
 export interface SlotRegisterOptions {
   /** The slot key to contribute into. */
   name: string
-  /** The cell id within the slot (must be unique for a list slot). */
-  id: string
+  /** The cell id within the slot (list slots only). */
+  id?: string
+  /** The node kind this renderer claims (keyed slots only). */
+  key?: string
   /** Optional render order (ascending, defaults to 0). */
   order?: number
 }
 
-/** The structural client context face this plugin consumes (slots service). */
+/** The structural client context face this plugin consumes. */
 export interface ClientContext {
   slots: {
     /** Register an entry into a slot; returns the disposer. */
@@ -43,14 +51,32 @@ export interface ClientContext {
     /** Scope a registration callback into a slot (session seat wiring). */
     inject(slot: string, callback: () => () => void): void
   }
+  /**
+   * Target-neutral Conversation registries. Reached structurally for the same
+   * reason as `slots`: the client bundle may not value-import the conversation
+   * package (purity gate), so the definition is registered through the runtime
+   * service instead.
+   */
+  uiConversation?: {
+    events?: {
+      /** Claim one event type for this plugin's own node kind. */
+      register(definition: unknown): () => void
+    }
+  }
   effect(callback: () => void | (() => void), name?: string): void
 }
 
 /** Apply claim: a duplicated client injection must not mount a second entry. */
 let claimed = false
 
-/** Services required before mounting (the slots service). */
-export const inject = ['slots']
+/**
+ * Services required before mounting.
+ *
+ * `uiConversation` is declared so the definition can be registered at all; a
+ * host that does not provide it leaves the quote unrendered rather than crashing
+ * (see the guarded block in {@link apply}).
+ */
+export const inject = ['slots', 'uiConversation']
 
 /** Plugin identity for the client module table. */
 export const name = 'dsh-quote'
@@ -77,5 +103,30 @@ export function apply(ctx: ClientContext): void {
     ))
   } catch (error) {
     console.error(`[dsh-quote] ${INPUT_OVERLAY_SLOT} registration failed:`, error)
+  }
+
+  // Claim this plugin's injected messages away from the default `context`
+  // classification and republish them as a visible `quote` node, then render that
+  // kind through our own seat. Both steps are optional: if the host does not
+  // expose the registry or the seat, the quote still reaches the model and we
+  // simply lose the row (ADR-0004).
+  try {
+    const events = ctx.uiConversation?.events
+    if (events === undefined) {
+      console.warn('[dsh-quote] uiConversation.events unavailable; quote rows will not render')
+    } else {
+      ctx.effect(() => events.register(createQuoteDefinition(QUOTE_CONTEXT_KIND)), 'dsh-quote: quote row')
+    }
+  } catch (error) {
+    console.error('[dsh-quote] quote definition registration failed:', error)
+  }
+
+  try {
+    ctx.slots.inject(CHAT_NODE_SLOT, () => ctx.slots.register(
+      { name: CHAT_NODE_SLOT, key: QUOTE_NODE_KIND },
+      QuoteRowView,
+    ))
+  } catch (error) {
+    console.error(`[dsh-quote] ${CHAT_NODE_SLOT} registration failed:`, error)
   }
 }

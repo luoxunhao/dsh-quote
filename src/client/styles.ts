@@ -163,6 +163,65 @@ const CSS = `
   background: var(--dsw-alias-bg-layer-2, rgba(128, 128, 128, 0.2));
   color: var(--dsw-alias-label-primary);
 }
+
+/* Visible quote row in the transcript: a compact injected-context line, styled
+   to read as "something put into context" rather than as a user bubble. */
+[data-dsh-quote-row] {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+[data-dsh-quote-row] .dsh-quote-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 0;
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+[data-dsh-quote-row] .dsh-quote-row-head:hover {
+  color: var(--dsw-alias-label-primary);
+}
+[data-dsh-quote-row] .dsh-quote-row-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  color: var(--dsw-alias-label-tertiary);
+}
+[data-dsh-quote-row] .dsh-quote-row-title {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+}
+[data-dsh-quote-row] .dsh-quote-row-sep {
+  flex: none;
+  width: 1px;
+  height: 12px;
+  background: var(--dsw-alias-border-l2, #3a3a3a);
+}
+[data-dsh-quote-row] .dsh-quote-row-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary);
+}
+[data-dsh-quote-row] .dsh-quote-row-body {
+  padding: 8px 10px;
+  border-left: 2px solid var(--dsw-alias-border-l2, #3a3a3a);
+  border-radius: 0 6px 6px 0;
+  background: var(--dsw-alias-bg-layer-2, rgba(128, 128, 128, 0.08));
+  color: var(--dsw-alias-label-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 `
 
 /** Inject the styles once; a repeated call is a no-op. */
