@@ -28,12 +28,6 @@ export class QuoteApiError extends Error {
   }
 }
 
-/** A quote the host already injected, as the composer shows it. */
-export interface SentQuote extends PendingQuote {
-  /** When the host consumed it, as epoch ms. */
-  readonly sentAt: number
-}
-
 /** The quotes API surface. */
 export interface QuoteApi {
   /** List a session's still-staged quotes (in insertion order). */
@@ -49,10 +43,6 @@ export interface QuoteApi {
    * @returns how many quotes became claimed.
    */
   claim(sessionId: string): Promise<number>
-  /** List the quotes already injected into a session, oldest first. */
-  sent(sessionId: string): Promise<readonly SentQuote[]>
-  /** Forget one sent quote (or all of them) so it stops being shown. */
-  dismissSent(sessionId: string, quoteId?: string): Promise<boolean>
 }
 
 async function request<T>(base: string, method: string, path: string, body?: unknown): Promise<T> {
@@ -82,26 +72,47 @@ async function request<T>(base: string, method: string, path: string, body?: unk
 /** Create the quotes API client against one base path. */
 export function createQuoteApi(base = '/dsh-quote/api'): QuoteApi {
   const enc = encodeURIComponent
+  /**
+   * A missing session id is never a request. Issuing one produces
+   * `?sessionId=undefined`, which the host answers as a session literally named
+   * "undefined"; that reply then races the real session's reply into the same
+   * store and can resurrect cards the user already sent. Refuse instead.
+   * @param sessionId - the id the caller believes it has.
+   * @param what - the operation name, for the warning.
+   * @returns the usable id, or undefined when there is none.
+   */
+  const requireSession = (sessionId: string, what: string): string | undefined => {
+    if (typeof sessionId !== 'string' || sessionId === '' || sessionId === 'undefined') {
+      console.warn(`[dsh-quote] ${what} skipped: no session id yet`)
+      return undefined
+    }
+    return sessionId
+  }
   return {
-    list: async (sessionId) => (await request<{ quotes: PendingQuote[] }>(base, 'GET', `/quotes?sessionId=${enc(sessionId)}`)).quotes,
+    list: async (sessionId) => {
+      const sid = requireSession(sessionId, 'list')
+      return sid === undefined
+        ? []
+        : (await request<{ quotes: PendingQuote[] }>(base, 'GET', `/quotes?sessionId=${enc(sid)}`)).quotes
+    },
     add: async (sessionId, quote) => {
-      const parsed = await request<{ quote: PendingQuote }>(base, 'PUT', `/quotes?sessionId=${enc(sessionId)}`, { quote })
+      const sid = requireSession(sessionId, 'add')
+      if (sid === undefined) throw new QuoteApiError(0, '还没有会话 id')
+      const parsed = await request<{ quote: PendingQuote }>(base, 'PUT', `/quotes?sessionId=${enc(sid)}`, { quote })
       return parsed.quote
     },
     remove: async (sessionId, quoteId) => {
+      const sid = requireSession(sessionId, 'remove')
+      if (sid === undefined) return false
       // DELETE carries no JSON body; the quote id travels as a query parameter.
-      const parsed = await request<{ ok: boolean }>(base, 'DELETE', `/quotes?sessionId=${enc(sessionId)}&quoteId=${enc(quoteId)}`)
+      const parsed = await request<{ ok: boolean }>(base, 'DELETE', `/quotes?sessionId=${enc(sid)}&quoteId=${enc(quoteId)}`)
       return parsed.ok
     },
     claim: async (sessionId) => {
-      const parsed = await request<{ claimed: number }>(base, 'POST', `/claim?sessionId=${enc(sessionId)}`)
-      return parsed.claimed
-    },
-    sent: async (sessionId) => (await request<{ quotes: SentQuote[] }>(base, 'GET', `/sent?sessionId=${enc(sessionId)}`)).quotes,
-    dismissSent: async (sessionId, quoteId) => {
-      const query = quoteId === undefined ? '' : `&quoteId=${enc(quoteId)}`
-      const parsed = await request<{ ok: boolean }>(base, 'DELETE', `/sent?sessionId=${enc(sessionId)}${query}`)
-      return parsed.ok
+      const sid = requireSession(sessionId, 'claim')
+      return sid === undefined
+        ? 0
+        : (await request<{ claimed: number }>(base, 'POST', `/claim?sessionId=${enc(sid)}`)).claimed
     },
   }
 }

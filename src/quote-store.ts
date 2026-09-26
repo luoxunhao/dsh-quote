@@ -6,8 +6,8 @@
  *
  * The store is deliberately pure TypeScript (no DSH dependency) so it is
  * trivially unit-testable and independent of the host's session model. A quote
- * records the plain text the user selected (verbatim rendered text, per
- * ADR-0001) plus, when known, the durable source message it came from.
+ * records the plain text the user selected (verbatim rendered text) plus, when
+ * known, the durable source message it came from. See ADR-0003.
  * @module dsh-quote/quote-store
  */
 
@@ -140,80 +140,5 @@ export class QuoteStore {
     const list = this.bySession.get(sessionId) ?? []
     this.bySession.delete(sessionId)
     return list
-  }
-}
-
-/**
- * One quote that HAS been sent, kept so the client can still show the user what
- * rode their message.
- *
- * Why this exists: the shipped GUI hides every ordinary injected-context row
- * (`ui-chat/chat-visibility.ts` keeps only system prompts out of the transcript
- * and admits a `context` node only when it carries tool additions/removals), so
- * an injected quote leaves no trace in the conversation the user can see. The
- * transcript cannot be made to show it — the row is filtered before any plugin
- * CSS or DOM marker could reach it. The affordance therefore lives where the
- * plugin does own surface: the composer. This record is what backs that card.
- */
-export interface SentQuote extends PendingQuote {
-  /** When the quote was consumed, as epoch ms (host clock). */
-  readonly sentAt: number
-}
-
-/** The transcript's own view of a session's sent quotes, newest last. */
-export interface SentQuoteState {
-  readonly sessionId: string
-  readonly quotes: readonly SentQuote[]
-}
-
-/** How many sent quotes a session retains for display. */
-const SENT_HISTORY_LIMIT = 20
-
-/**
- * In-memory, per-session record of quotes already injected into the model
- * context, so the composer can keep showing what was sent.
- *
- * Bounded and volatile by design: this is a display convenience, not a durable
- * log. The authoritative record of an injected quote is the session log's
- * `user/message` event carrying source kind `quote-context`.
- * @class
- */
-export class SentQuoteStore {
-  private readonly bySession = new Map<string, SentQuote[]>()
-
-  /**
-   * Record the quotes one step just injected.
-   * @param sessionId - the owning session.
-   * @param quotes - the quotes consumed by that step, in injection order.
-   * @param sentAt - epoch ms of the send, defaults to now.
-   * @returns the recorded entries.
-   */
-  record(sessionId: string, quotes: readonly PendingQuote[], sentAt = Date.now()): readonly SentQuote[] {
-    if (quotes.length === 0) return []
-    const recorded = quotes.map(quote => ({ ...quote, sentAt }))
-    const next = [...(this.bySession.get(sessionId) ?? []), ...recorded].slice(-SENT_HISTORY_LIMIT)
-    this.bySession.set(sessionId, next)
-    return recorded
-  }
-
-  /** The quotes a session has sent, oldest first. */
-  list(sessionId: string): readonly SentQuote[] {
-    return this.bySession.get(sessionId) ?? []
-  }
-
-  /** Drop one sent quote by id; true when it existed. */
-  remove(sessionId: string, quoteId: string): boolean {
-    const list = this.bySession.get(sessionId)
-    if (list === undefined) return false
-    const next = list.filter(quote => quote.id !== quoteId)
-    if (next.length === list.length) return false
-    if (next.length === 0) this.bySession.delete(sessionId)
-    else this.bySession.set(sessionId, next)
-    return true
-  }
-
-  /** Forget one session's sent history entirely. */
-  clear(sessionId: string): void {
-    this.bySession.delete(sessionId)
   }
 }

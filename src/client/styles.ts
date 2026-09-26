@@ -9,9 +9,9 @@
  * room in the card with a `:has()` guard, so the draft text is pushed below the
  * cards instead of being covered by them.
  *
- * The transcript is deliberately not styled: the GUI filters ordinary
- * injected-context rows out before any renderer runs, so there is no transcript
- * surface this plugin can reach. See `docs/adr/0002-quote-visibility.md`.
+ * The transcript is deliberately not styled: a quote is delivered as an ordinary
+ * user message, so the GUI's own user-bubble chrome renders it and this plugin
+ * contributes nothing there. See `docs/adr/0003-quote-as-user-message.md`.
  * @module dsh-quote/client/styles
  */
 
@@ -160,103 +160,6 @@ const CSS = `
   opacity: 1;
 }
 [data-dsh-quote-rail] .dsh-quote-card-remove:hover {
-  background: var(--dsw-alias-bg-layer-2, rgba(128, 128, 128, 0.2));
-  color: var(--dsw-alias-label-primary);
-}
-
-/* Sent-quote receipt: the same card shape as a pending quote, set apart by a
-   quieter treatment and a leading rule, because it reports something that has
-   already happened rather than something the user can still act on. */
-[data-dsh-quote-receipt] {
-  position: absolute;
-  top: ${RAIL_INSET}px;
-  left: ${RAIL_SIDE_INSET}px;
-  right: ${RAIL_SIDE_INSET}px;
-  z-index: 3;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
-}
-[data-dsh-quote-receipt]::-webkit-scrollbar {
-  display: none;
-}
-/* Room for the receipt, only while one is mounted and no pending rail is
-   claiming the slot: the rail is the higher-priority affordance, and both
-   rendering at once would overlap them on the same anchor. */
-[data-composer-card]:has([data-dsh-quote-receipt]):not(:has([data-dsh-quote-rail])) {
-  padding-top: ${RAIL_INSET + CARD_HEIGHT + RAIL_INSET}px;
-}
-[data-dsh-quote-receipt] .dsh-quote-receipt-card {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  max-width: 300px;
-  height: ${CARD_HEIGHT}px;
-  padding: 0 8px 0 6px;
-  border: 1px solid var(--dsw-alias-border-l2, #3a3a3a);
-  border-left: 2px solid var(--dsw-alias-label-caption, #6b6b6b);
-  border-radius: 10px;
-  background: var(--dsw-alias-bg-base);
-  overflow: hidden;
-}
-[data-dsh-quote-receipt] .dsh-quote-receipt-icon {
-  flex: none;
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-layer-2, rgba(128, 128, 128, 0.14));
-  color: var(--dsw-alias-label-tertiary);
-}
-[data-dsh-quote-receipt] .dsh-quote-receipt-body {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-[data-dsh-quote-receipt] .dsh-quote-receipt-title {
-  font-size: 13px;
-  line-height: 18px;
-  color: var(--dsw-alias-label-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-[data-dsh-quote-receipt] .dsh-quote-receipt-sub {
-  font-size: 11px;
-  line-height: 14px;
-  color: var(--dsw-alias-label-tertiary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-[data-dsh-quote-receipt] .dsh-quote-receipt-close {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 14px;
-  line-height: 1;
-  cursor: pointer;
-  opacity: 0;
-}
-[data-dsh-quote-receipt] .dsh-quote-receipt-card:hover .dsh-quote-receipt-close,
-[data-dsh-quote-receipt] .dsh-quote-receipt-close:focus-visible {
-  opacity: 1;
-}
-[data-dsh-quote-receipt] .dsh-quote-receipt-close:hover {
   background: var(--dsw-alias-bg-layer-2, rgba(128, 128, 128, 0.2));
   color: var(--dsw-alias-label-primary);
 }

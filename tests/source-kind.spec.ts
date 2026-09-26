@@ -1,52 +1,41 @@
 /**
- * Source-kind contract: the durable `source.kind` the host stamps on an injected
- * quote, and the fact that the transcript does NOT show it.
+ * A quote must be delivered as an ordinary user message.
  *
- * Why this is a test and not a comment: the harness has no shared catch-all
- * `plugin` source kind — each producer declares its own by augmenting
- * `MessageSourceMap` — so this string is the durable attribution that makes an
- * injected quote identifiable in the session log. It is deliberately NOT a
- * transcript handle. The shipped GUI hides every ordinary injected-context row
- * (`ui-chat`'s `isVisibleChatNode` admits a `context` node only when it carries
- * tool additions/removals), so a quote injected with this kind renders nowhere.
- *
- * The second half of this file pins that reasoning as an executable expectation,
- * because the 0.2 release shipped a stylesheet and a DOM marker that keyed on
- * this string and silently matched nothing.
+ * Why this is a test and not a comment: the GUI renders a transcript bubble only
+ * for messages whose source kind is `user`. Any other kind — including a
+ * plugin-private one — is classified as injected context and filtered out of the
+ * transcript before any renderer runs. A quote that is not a `user` message is
+ * therefore invisible by construction, which is exactly the defect this pins
+ * against (ADR-0002, ADR-0003).
  */
 import { describe, expect, it } from 'vitest'
 
 import { buildContextUserMessage } from '../src/quote-context.ts'
-import { QUOTE_CONTEXT_KIND, PLUGIN_NAME } from '../src/source-kind.ts'
+import { PLUGIN_NAME } from '../src/source-kind.ts'
 
 /** A minimal pending quote, as the store hands one to the context factory. */
 const QUOTE = { id: 'q1', text: '选中的一段文字' }
 
-describe('injected quote source', () => {
-  it('carries the declared quote-context kind', () => {
-    const message = buildContextUserMessage(QUOTE)
-    expect(message.source).toMatchObject({ kind: QUOTE_CONTEXT_KIND })
+describe('quote delivery', () => {
+  it('carries the ordinary user source kind so the GUI renders a bubble', () => {
+    expect(buildContextUserMessage(QUOTE).source).toMatchObject({ kind: 'user' })
   })
 
-  it('does not use the removed catch-all plugin kind', () => {
-    // The pre-0.1.7 runtime accepted `kind: 'plugin'`; 0.1.7-rc.2 declares no
-    // such kind and the type rejects it at compile time. Pin the runtime value
-    // too so a regression is caught even if a future type widens again.
-    expect(buildContextUserMessage(QUOTE).source.kind).not.toBe('plugin')
+  it('is a user-role message', () => {
+    expect(buildContextUserMessage(QUOTE).role).toBe('user')
   })
 
-  it('is a notice carrying the model-visible quote verbatim', () => {
+  it('carries the quoted text verbatim as its only content', () => {
     const message = buildContextUserMessage(QUOTE)
-    expect(message.source).toMatchObject({ form: 'notice' })
     expect(message.content).toEqual([{ type: 'text', text: QUOTE.text }])
-    expect((message.source as { summary?: string }).summary).toContain(QUOTE.text)
   })
 
-  it('distinguishes the durable source kind from the cordis plugin name', () => {
-    // The GUI derives a context row's producer label from `source.kind`, never
-    // from the plugin name, so the two being distinct is load-bearing: a marker
-    // keyed on the plugin name would have matched no row even before the row was
-    // filtered out.
-    expect(QUOTE_CONTEXT_KIND).not.toBe(PLUGIN_NAME)
+  it('does not use a plugin-private kind, which the transcript would hide', () => {
+    // The removed plugin kind and the cordis plugin name are both wrong here:
+    // either one would be classified as injected context and never rendered.
+    const message = buildContextUserMessage(QUOTE)
+    expect(message.source.kind).not.toBe('quote-context')
+    expect(message.source.kind).not.toBe(PLUGIN_NAME)
+    expect(message.source.kind).toBe('user')
   })
 })

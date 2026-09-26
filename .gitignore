@@ -4,3 +4,6 @@ dist/
 .pnpm-store/
 *.log
 .DS_Store
+
+# Local scratch: probe outputs and hand-run debug artifacts.
+.scratch/

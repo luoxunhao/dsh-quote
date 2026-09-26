@@ -132,12 +132,18 @@ export function foldPendingQuotes<M extends MessageLike>(
   if (quotes.length === 0) return decision
   const injected = quotes.map(quote => makeContext.contextMessage(quote))
   pending.take(sessionId)
-  // Insert right after the LAST genuine user-origin message in the step. We
-  // locate it by SOURCE KIND, not reference identity: `claimed` (the inbox
-  // slice the loop hands the listener) and the messages inside `decision.messages`
-  // may not be the same object instances, so `includes`-based placement is
-  // fragile. The user's own text must stay ahead of the injected context.
+  // Insert directly BEFORE the last genuine user-origin message in the step, so
+  // the quote reads as the passage the question is about and the user's own
+  // words follow it.
+  //
+  // The anchor is located by SOURCE KIND, not reference identity: `claimed` (the
+  // inbox slice the loop hands the listener) and the messages inside
+  // `decision.messages` may not be the same object instances, so `includes`-based
+  // placement is fragile. Note the injected quotes are THEMSELVES
+  // `source.kind === 'user'` — that is what makes the GUI render them as bubbles —
+  // so the anchor is resolved here, against the still-unmodified
+  // `decision.messages`, and can never land on a quote.
   const lastUserIndex = decision.messages.findLastIndex(message => message.source?.kind === 'user')
-  const insertAt = lastUserIndex >= 0 ? lastUserIndex + 1 : decision.messages.length
+  const insertAt = lastUserIndex >= 0 ? lastUserIndex : decision.messages.length
   return { kind: 'enter', messages: decision.messages.toSpliced(insertAt, 0, ...injected) }
 }

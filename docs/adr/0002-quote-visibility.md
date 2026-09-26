@@ -1,9 +1,11 @@
 # ADR-0002: 引文的可见性落在 composer，不在转录区
 
-- 状态：已采纳
+- 状态：**已被取代**（转录区部分）——见 [`ADR-0003`](./0003-quote-as-user-message.md)
 - 日期：2026
 - 涉及：dsh-quote（引文注入工具）
 - 取代：0.2 的「转录区注入卡片」方案（`src/client/context-rows.ts` + `styles.ts` 的 `[data-dsh-quote-context]` 段）
+
+> **后续更正（ADR-0003）**：本 ADR 对 `isVisibleChatNode` 的实测与分析**依然成立**——插件私有 kind 的注入行确实永远不可见。但它由此推出的「转录区卡片不可实现」**只对"引文必须是注入上下文"这一前提成立**。ADR-0003 决定改为把引文投递成普通 `user` 消息后，转录区会正常渲染成用户气泡，而本 ADR 引入的**回执卡**（`SentReceipt` / `SentQuoteStore` / `/sent` 路由）已被删除——它顶在 composer 同一位置并停留 12 秒，正是用户报告的「发送后卡片不消失」。下文的 composer 部分（发送即认领、原子折叠、trace 诊断）仍然有效。
 
 ## 背景
 
@@ -50,13 +52,14 @@ export function isVisibleChatNode(node: ChatNode): boolean {
 3. **发送后**：宿主在 `agent/pre-step` 折叠时把实际注入的引文记进一个有界的 per-session 记录（`SentQuoteStore`），composer 轮询到后显示一张**回执卡**（`data-dsh-quote-receipt`），说明这段引文确实随刚才那条消息作为上下文注入了，约 12 秒后自动消失，也可手动关掉。
 4. **引文的权威记录仍是 session log**：注入消息带 durable `source.kind === 'quote-context'`（ADR-0001）。回执只是显示便利，不持久化、不跨会话、有上限。
 
-### 发送即认领（claim）：卡片不再回来
+### 发送即认领（claim）：认领归宿主，client 只显示
 
-发送瞬间清空的**触发信号是草稿被清空**——按下 Enter 会提交并清空可编辑区。
+**触发点最终定为宿主的 `agent/inbox/inserted`**——用户消息进入 inbox 的那一刻，早于任何回合开始，所以 agent 忙时消息只是排队、这个事件照样触发。
 
-早期版本用"回合开始"（停止控件出现）做上升沿，**这是错的**：agent 已经在思考时发送，没有上升沿可捕获，卡片一直挂着。这是第一次修正（实测回合中发送 **4ms**，空闲 **222–230ms**）。
+这一条是三次修正的结果，前两次都错在**让 client 去猜"用户发送了"**：
 
-但**只做 DOM 隐藏仍然不够**。第二次修正的原因：agent 忙时发送**不会开始新回合**（消息排队，agent 继续干活），引用在宿主侧**合法地**仍是 pending，于是轮询把卡片刷回来，并一直停到那个排队消息被处理为止。实测：
+1. **第一次**：用"回合开始"（停止控件出现）做上升沿。**错**——agent 已在思考时发送没有上升沿可捕获。
+2. **第二次**：改用"草稿被清空"做上升沿，并加 `POST /claim`。**仍然不够**——实测发现**整个 GUI 根本没有停止控件**（`stopLike=0` 恒定），我最初依赖的信号从来不存在；而"草稿清空"这条边在 agent 忙时会被后续的轮询覆盖，卡片刷回来并停到排队消息被处理为止：
 
 ```
 sent+0.8s   rail=false  hostPending=1   ← 乐观隐藏
@@ -65,15 +68,19 @@ sent+30s    rail=true   hostPending=1   ← 仍停着（agent 还在思考）
 sent+45s    rail=false  hostPending=0   ← 直到回合结束才走
 ```
 
-对"已经把它发出去"的用户来说，停 40 秒就是 bug。**修法是把认领落到宿主**：发送时 client 调 `POST /dsh-quote/api/claim`，`QuoteStore.claim()` 给当前所有 pending 打上 `claimed`；`GET /quotes` 只返回**未认领**的（`staged()`），于是卡片不再回来。引用**仍留在 store 里**，折叠照常注入它。
+3. **第三次（现行）**：宿自己在 `agent/inbox/inserted` 里认领——收到 kind 为 `user` 的消息时，`QuoteStore.claim()` 给该会话所有待生效引用打上 `claimed`，`GET /quotes` 只返回未认领的（`staged()`）。client **不再判断是否发送**，只显示宿主的状态；轮询退化为纯同步通道。
 
-**认领只改呈现，绝不丢引用**——实测（回合中 staged → 发送 → 问模型口令）：
+引用**仍留在 store 里**，折叠照常注入它——认领只改呈现。
+
+**实测（agent 回复中，连发 3 条引用 → 发送）**：
 
 ```
-rail visible 4s after send: false          ← 卡片不回来
-quote drained and recorded as sent: true   ← 折叠仍然注入并记账
-MODEL ECHOED THE QUOTE: true               ← 模型确实收到了（回显 ZXQ-7788）
+cleared after: 100ms
+t=3s … t=8s   cards=0  hostStaged=0  hostSent=3   ← 100ms 清空，且确实注入
+t=12s+        cards=0  hostStaged=0  hostSent=0   ← 回执 12s TTL 到点（预期）
 ```
+
+**从这次失败得到的教训**：client 端任何"猜用户做了什么"的信号都不可靠。宿主有权威事件，用它；DOM 副作用只能作为提示，不能作为判据。
 
 ## 补充：卡片"发送后不消失"的两种成因
 

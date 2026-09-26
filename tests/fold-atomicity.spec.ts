@@ -83,7 +83,7 @@ describe('foldPendingQuotes failure atomicity', () => {
       contextMessage: () => msg('plugin'),
     })
     if (out.kind !== 'enter') throw new Error('expected enter')
-    expect(out.messages.map(m => m.source?.kind)).toEqual(['user', 'plugin'])
+    expect(out.messages.map(m => m.source?.kind)).toEqual(['plugin', 'user'])
     expect(store.has('s')).toBe(false)
   })
 })

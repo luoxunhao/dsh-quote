@@ -1,21 +1,22 @@
 /**
  * dsh-quote host half: serves the pending-quote HTTP bridge and folds pending
- * quotes into the next real user-text turn as injected context.
+ * quotes into the next real user-text turn as user messages.
  *
  * The client bundle captures a text selection and calls the loopback HTTP API
  * below to add a pending quote to its session. The `agent/pre-step` fold then
- * consumes that session's pending quotes on its next real user-text message —
- * injecting them as plugin-sourced context (never into the user's message
- * text), one-shot, and clearing them. See ADR-0001 and `quote-fold.ts`.
+ * consumes that session's pending quotes on its next real user-text message,
+ * delivering each as an ordinary user-role message — a visible user bubble, never
+ * merged into the user's own message text — one-shot, then clearing the queue.
+ * See ADR-0003 and `quote-fold.ts`.
  *
- * Consumed quotes are also recorded in a bounded per-session list the composer
- * reads back, because the transcript cannot show them: the shipped GUI hides
- * every ordinary injected-context row. See ADR-0002.
+ * There is deliberately no sent-quote record here. The transcript shows the quote
+ * by itself now (it IS a user message), so the composer needs no receipt, and a
+ * receipt is exactly what used to linger after a send. See ADR-0003.
  *
  * Set `DSH_QUOTE_TRACE=<path>` to append one JSON line per `agent/pre-step`
- * invocation. The fold's upstream conditions (a fresh user-origin message in the
- * claimed slice) are not visible from the outside, so a quote that never gets
- * consumed is otherwise undiagnosable.
+ * invocation plus one per claim/list. The fold's upstream conditions (a fresh
+ * user-origin message in the claimed slice) are not visible from the outside, so
+ * a quote that never gets consumed is otherwise undiagnosable.
  * @module dsh-quote/index
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -24,7 +25,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 
-import { QuoteStore, SentQuoteStore } from './quote-store.ts'
+import { QuoteStore } from './quote-store.ts'
 import { foldPendingQuotes } from './quote-fold.ts'
 import type { PendingQuote } from './quote-store.ts'
 import { contextMessageFactory } from './quote-context.ts'
@@ -86,7 +87,6 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
  */
 export function apply(ctx: Context): void {
   const store = new QuoteStore()
-  const sent = new SentQuoteStore()
 
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
@@ -100,7 +100,10 @@ export function apply(ctx: Context): void {
       const method = request.method ?? 'GET'
       const body = await readJsonBody(request)
       const { sessionId } = parseQuery(url)
-      if (sessionId === undefined) {
+      // 'undefined' is what a client with no session id sends when it
+      // interpolates a missing value. Treating it as a real session would let a
+      // stale or unbound dock create a phantom queue that races the real one.
+      if (sessionId === undefined || sessionId === '' || sessionId === 'undefined') {
         writeJson(response, 400, { ok: false, error: 'missing sessionId' })
         return
       }
@@ -108,7 +111,9 @@ export function apply(ctx: Context): void {
       if (url.pathname.endsWith('/quotes') && method === 'GET') {
         // Only the quotes still staged as a draft; a claimed one already rode a
         // sent message and must not reappear as removable.
-        writeJson(response, 200, { quotes: store.staged(sessionId) })
+        const staged = store.staged(sessionId)
+        trace({ ev: 'list-staged', sessionId, count: staged.length, claimed: store.list(sessionId).map(q => q.claimed === true) })
+        writeJson(response, 200, { quotes: staged })
         return
       }
       if (url.pathname.endsWith('/quotes') && method === 'PUT') {
@@ -142,30 +147,52 @@ export function apply(ctx: Context): void {
         // Without this the quote legitimately stays pending until the queued
         // message is finally picked up, and the composer shows the card again —
         // correct by the old semantics, and useless to the user who just sent it.
-        // Marking it `claiming` keeps it in the store (the fold still needs to
+        // Marking it `claimed` keeps it in the store (the fold still needs to
         // drain and inject it) while telling the client to stop showing it.
         const claimed = store.claim(sessionId)
         writeJson(response, 200, { ok: true, claimed: claimed.length })
         return
       }
-      if (url.pathname.endsWith('/sent') && method === 'GET') {
-        writeJson(response, 200, { quotes: sent.list(sessionId) })
-        return
-      }
-      if (url.pathname.endsWith('/sent') && method === 'DELETE') {
-        // Dismissing the "what I sent" card must not be undone by the next poll.
-        const quoteId = url.searchParams.get('quoteId')
-        if (typeof quoteId === 'string' && quoteId !== '') {
-          writeJson(response, 200, { ok: sent.remove(sessionId, quoteId) })
-          return
-        }
-        sent.clear(sessionId)
-        writeJson(response, 200, { ok: true })
-        return
-      }
       writeJson(response, 405, { ok: false, error: 'method not allowed' })
     },
   }), 'dsh-quote: api routes')
+
+  // Claim the staged quotes the moment the user's message reaches the inbox.
+  //
+  // `agent/inbox/inserted` is the authoritative "the user sent" signal: it fires
+  // as the message is spliced into the inbox, BEFORE any turn starts, so it is
+  // true even when the agent is mid-turn and the message merely queues. The client
+  // cannot detect that case from the DOM, which is why claiming used to be driven
+  // by a client-side guess and the card came back (ADR-0002).
+  //
+  // Note the runtime does NOT honour the declared `payload.agent` for this event:
+  // `dsh-agent-loop` emits `{ message }` alone, even though the published payload
+  // type lists an `agent` field. Reading `agent.session.id` therefore throws, and
+  // a local catch would swallow it silently — leaving the quote unclaimed forever.
+  // The session id is taken from the message's own scope instead: the dispatch is
+  // agent-scoped, so the listener's `this` carries the owning agent.
+  //
+  // Claiming only marks the quotes as belonging to a sent message; the fold still
+  // injects them, so a quote is never lost by being claimed early.
+  ctx.on('agent/inbox/inserted', function (this: unknown, payload: { agent?: unknown; message?: unknown }) {
+    try {
+      const message = payload.message as { source?: { kind?: string } } | undefined
+      const owner = (payload.agent ?? this) as
+        | { session?: { id?: string } }
+        | undefined
+      const sessionId = owner?.session?.id
+      if (message?.source?.kind !== 'user') return
+      if (typeof sessionId !== 'string' || sessionId === '') {
+        ctx.logger.warn('dsh-quote: inbox insert had no owning session; cannot claim')
+        return
+      }
+      const claimed = store.claim(sessionId)
+      trace({ ev: 'claimed-on-send', sessionId, count: claimed.length })
+    } catch (error) {
+      trace({ ev: 'claim-error', error: String(error) })
+      ctx.logger.warn('dsh-quote: claim on send failed: %o', error)
+    }
+  })
 
   // Fold pending quotes into the next real user-text turn as injected context.
   // The fold is pure and hands back only the decision, so the quotes it consumed
@@ -180,7 +207,6 @@ export function apply(ctx: Context): void {
       const rewritten = foldPendingQuotes(decision, messages, store, sessionId, contextMessageFactory)
       const remaining = store.list(sessionId)
       const injected = pendingBefore.filter(quote => !remaining.some(kept => kept.id === quote.id))
-      if (injected.length > 0) sent.record(sessionId, injected)
       // Record BOTH collections: the fold gates on `claimed` but places against
       // `decision.messages`, so a divergence between them is exactly the case
       // where a real user turn fails to consume its quote.

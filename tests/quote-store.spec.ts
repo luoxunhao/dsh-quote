@@ -1,11 +1,11 @@
 /**
  * dsh-quote quote-store unit tests: session isolation, insertion order,
- * per-quote removal, wholesale clear, one-shot drain semantics, and the sent
- * history that backs the composer receipt.
+ * per-quote removal, wholesale clear, one-shot drain semantics, and the claim
+ * marking that clears the composer rail on send.
  */
 import { describe, expect, it } from 'vitest'
 
-import { QuoteStore, SentQuoteStore } from '../src/quote-store.ts'
+import { QuoteStore } from '../src/quote-store.ts'
 
 describe('QuoteStore', () => {
   it('starts empty per session', () => {
@@ -127,67 +127,5 @@ describe('QuoteStore claim-on-send', () => {
     const taken = store.take('s1')
     expect(taken.map(q => q.text)).toEqual(['rides the sent message'])
     expect(store.has('s1')).toBe(false)
-  })
-})
-
-describe('SentQuoteStore', () => {
-  it('starts empty per session', () => {
-    const store = new SentQuoteStore()
-    expect(store.list('s1')).toEqual([])
-  })
-
-  it('records sent quotes oldest first, per session', () => {
-    const store = new SentQuoteStore()
-    store.record('s1', [{ id: 'q1', text: 'first' }], 1000)
-    store.record('s1', [{ id: 'q2', text: 'second' }], 2000)
-    store.record('s2', [{ id: 'q3', text: 'other' }], 3000)
-    expect(store.list('s1').map(q => q.text)).toEqual(['first', 'second'])
-    expect(store.list('s2').map(q => q.text)).toEqual(['other'])
-    expect(store.list('s1')[0]?.sentAt).toBe(1000)
-  })
-
-  it('records several quotes from one step in injection order', () => {
-    const store = new SentQuoteStore()
-    const recorded = store.record('s1', [{ id: 'a', text: 'a' }, { id: 'b', text: 'b' }], 500)
-    expect(recorded).toHaveLength(2)
-    expect(store.list('s1').map(q => q.id)).toEqual(['a', 'b'])
-  })
-
-  it('records nothing when a step injected nothing', () => {
-    const store = new SentQuoteStore()
-    expect(store.record('s1', [])).toEqual([])
-    expect(store.list('s1')).toEqual([])
-  })
-
-  it('keeps the history bounded, dropping the oldest', () => {
-    const store = new SentQuoteStore()
-    for (let i = 0; i < 25; i += 1) store.record('s1', [{ id: `q${i}`, text: `t${i}` }], i)
-    const list = store.list('s1')
-    expect(list).toHaveLength(20)
-    expect(list[0]?.id).toBe('q5')
-    expect(list.at(-1)?.id).toBe('q24')
-  })
-
-  it('drops one sent quote by id and reports whether it existed', () => {
-    const store = new SentQuoteStore()
-    store.record('s1', [{ id: 'q1', text: 'a' }, { id: 'q2', text: 'b' }], 0)
-    expect(store.remove('s1', 'q1')).toBe(true)
-    expect(store.list('s1').map(q => q.id)).toEqual(['q2'])
-    expect(store.remove('s1', 'nope')).toBe(false)
-    // removing the last entry clears the bucket
-    expect(store.remove('s1', 'q2')).toBe(true)
-    expect(store.list('s1')).toEqual([])
-  })
-
-  it('reports false when removing from an unknown session', () => {
-    const store = new SentQuoteStore()
-    expect(store.remove('missing', 'q1')).toBe(false)
-  })
-
-  it('clear forgets a session entirely', () => {
-    const store = new SentQuoteStore()
-    store.record('s1', [{ id: 'q1', text: 'a' }], 0)
-    store.clear('s1')
-    expect(store.list('s1')).toEqual([])
   })
 })

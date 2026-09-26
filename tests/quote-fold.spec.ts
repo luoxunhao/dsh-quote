@@ -79,18 +79,17 @@ describe('foldPendingQuotes', () => {
     expect(out).toBe(d)
   })
 
-  it('injected context does not enter the user message text (separate messages)', () => {
+  it('quote does not enter the user message text (separate messages)', () => {
     const claimed = [msg('user', 'the-user-typed-question')]
     const d = enterDecision(claimed)
     const out = foldPendingQuotes(d, claimed, fakePending([{ id: 'q', text: 'quoted block' }]), 's', fakeFactory)
     if (out.kind !== 'enter') return
-    // the user's own message is preserved verbatim as the first message
-    expect(out.messages[0]).toBe(claimed[0])
-    // an injected context message follows it, distinct from the user text
-    expect(out.messages[1]).not.toBe(claimed[0])
+    // the quote is its own message ahead of the user's, which stays verbatim
+    expect(out.messages[0]).not.toBe(claimed[0])
+    expect(out.messages[1]).toBe(claimed[0])
   })
 
-  it('places injected context after the user message even when decision.messages instances differ from claimed', () => {
+  it('places the quote above the user message even when decision.messages instances differ from claimed', () => {
     // Simulate the loop handing the listener a `claimed` slice that is NOT the
     // same object instance as the messages inside decision.messages. Placement
     // must be by source kind, not reference identity.
@@ -99,10 +98,10 @@ describe('foldPendingQuotes', () => {
     const d = enterDecision(inDecision)
     const out = foldPendingQuotes(d, claimed, fakePending([{ id: 'q', text: 'quoted' }]), 's', fakeFactory)
     if (out.kind !== 'enter') return
-    expect(out.messages.map(m => m.source?.kind)).toEqual(['user', 'plugin', 'tool'])
-    expect(out.messages[0]).toBe(inDecision[0]) // user message unchanged & first
-    // injected context lands right after the user message (index 1), before the tool result
-    expect(out.messages[1]?.source?.kind).toBe('plugin')
+    expect(out.messages.map(m => m.source?.kind)).toEqual(['plugin', 'user', 'tool'])
+    // the quote reads first, then the user's own words, then the tool result
+    expect(out.messages[0]?.source?.kind).toBe('plugin')
+    expect(out.messages[1]).toBe(inDecision[0]) // user message unchanged, now second
     expect(out.messages[2]).toBe(inDecision[1]) // tool result preserved after
   })
 

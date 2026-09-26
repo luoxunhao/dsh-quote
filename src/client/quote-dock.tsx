@@ -15,9 +15,10 @@
  * to a logged no-op, never a throw, so a host that composes differently simply
  * shows no affordance.
  *
- * Note the transcript is deliberately NOT touched. An earlier revision marked
- * this plugin's injected-context rows there; the GUI filters those rows out
- * before any renderer runs, so the marker matched nothing. See ADR-0002.
+ * The transcript is NOT touched from here, and it does not need to be: a quote
+ * is delivered to the host as an ordinary user-role message, so the GUI renders
+ * it as a normal user bubble on its own (see ADR-0003). This module owns only
+ * the two composer affordances — the selection menu and the staged-quote rail.
  * @module dsh-quote/client/quote-dock
  */
 
@@ -25,8 +26,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 
 import type { ChatNodeStoreLike } from './slot-props.ts'
-import { createQuoteApi, type QuoteApi, type SentQuote } from './api.ts'
-import { toSentQuoteCard, type SentQuoteCard } from './sent-quotes.ts'
+import { createQuoteApi, type QuoteApi } from './api.ts'
 
 /** Selector over the chat snapshot we use to resolve a node key. */
 type ChatNodeStore = ChatNodeStoreLike
@@ -36,29 +36,12 @@ const COPY_LABEL = '复制文本'
 const COPIED_LABEL = '已复制'
 const ADD_LABEL = '添加到对话'
 const REMOVE_LABEL = '移除引用'
-const DISMISS_LABEL = '不再显示'
-/** Shown on a quote card while the agent is mid-turn and cannot take it yet. */
-const RAIL_BUSY_HINT = '回合进行中，稍后随你的消息发出'
 /** Shown on a quote card that has been waiting for the user to send. */
 const RAIL_WAITING_HINT = '发送后随你的消息作为上下文'
 /** How long a quote must sit before the rail explains what it is waiting for. */
 const RAIL_WAITING_MS = 3000
-/**
- * How long the pending poll stays quiet after a send, so it cannot re-show cards
- * the user already saw disappear before the host has drained the queue.
- */
-const SEND_GRACE_MS = 2500
 /** Gap between the selection and the menu, and between the menu and a viewport edge. */
 const MENU_OFFSET = 8
-/**
- * How long a sent-quote receipt stays up before it dismisses itself.
- *
- * The receipt reports something that already happened, so it must not become
- * permanent chrome; the transcript is not going to confirm it, and the session
- * log is the durable record. Twelve seconds is long enough to read one line and
- * short enough not to sit in the composer.
- */
-const RECEIPT_TTL_MS = 12_000
 
 /** One resolved quote candidate from a selection over a chat row. */
 export interface QuoteCandidate {
@@ -237,29 +220,27 @@ function QuoteGlyph(): ReactElement {
  * yet, and the queue correctly keeps the quote. From the outside that is
  * indistinguishable from a stall, so once a card has waited past
  * {@link RAIL_WAITING_MS} the rail says so instead of silently sitting there.
- * @param props - the session's pending quotes, their removal handler, and whether
- * a turn is currently running.
+ * @param props - the session's staged quotes and their removal handler.
  */
 export function QuoteRail(props: {
   quotes: readonly RailQuote[]
   onRemove: (quoteId: string) => void
-  /** Whether the agent is currently mid-turn (so the quote cannot ride yet). */
-  busy?: boolean
 }): ReactElement | null {
-  const { quotes, onRemove, busy = false } = props
+  const { quotes, onRemove } = props
   const [waited, setWaited] = useState(false)
   const firstId = quotes[0]?.id
 
-  // A quote that arrives while the agent is busy is waiting by definition; one
-  // that is still here after the settle window is waiting for the user.
+  // A card still here after the settle window is waiting for the user to send.
+  // There is no "agent is busy" state to show: the composer gives a plugin no
+  // running-turn affordance, so any such indicator would be a guess.
   useEffect(() => {
-    if (firstId === undefined || busy) { setWaited(false); return undefined }
+    if (firstId === undefined) { setWaited(false); return undefined }
     const timer = window.setTimeout(() => setWaited(true), RAIL_WAITING_MS)
     return () => window.clearTimeout(timer)
-  }, [firstId, busy])
+  }, [firstId])
 
   if (quotes.length === 0) return null
-  const hint = busy ? RAIL_BUSY_HINT : (waited ? RAIL_WAITING_HINT : null)
+  const hint = waited ? RAIL_WAITING_HINT : null
   return (
     <div data-dsh-quote-rail="" className="dsh-quote-rail" role="list">
       {quotes.map((quote) => (
@@ -283,44 +264,30 @@ export function QuoteRail(props: {
 }
 
 /**
- * The sent-quote receipt: a short-lived acknowledgement that the quotes the user
- * staged actually rode their last message as injected context.
+ * Filter a host "staged quotes" reply down to what the rail may show, and prune
+ * the submitted-id record.
  *
- * This is the replacement for the transcript card the plugin cannot have. The
- * GUI hides ordinary injected-context rows before any renderer sees them
- * (ADR-0002), so without this the user's only evidence would be the model
- * happening to mention the quote. Renders nothing when no quote was just sent.
- * @param props - the recently injected quotes and their dismissal handler.
+ * This is the rule that makes requirement 2 hold: a quote the user has already
+ * submitted must never reappear as a removable draft, however the poll races the
+ * host's own drain. A send made while the agent is busy starts no turn, so the
+ * host legitimately keeps reporting the quote as staged for as long as the agent
+ * works — a time-based suppression cannot cover that, an id-based one can.
+ *
+ * The record is pruned of ids the host no longer reports at all, so it stays
+ * proportional to what is actually in flight rather than growing all session.
+ * An id the host STILL reports is deliberately kept: that is precisely the
+ * "claimed but not yet drained" state the card must stay hidden through.
+ * @param staged - the quotes the host reports as staged.
+ * @param submitted - the mutable record of ids already submitted this session.
+ * @returns the quotes the rail should render.
  */
-export function SentReceipt(props: {
-  quotes: readonly SentQuoteCard[]
-  onDismiss: (quoteId: string) => void
-}): ReactElement | null {
-  const { quotes, onDismiss } = props
-  if (quotes.length === 0) return null
-  return (
-    <div data-dsh-quote-receipt="" className="dsh-quote-receipt" role="list">
-      {quotes.map(quote => (
-        <div key={quote.id} data-quote-id={quote.id} className="dsh-quote-receipt-card" role="listitem" title={quote.text}>
-          <span className="dsh-quote-receipt-icon"><QuoteGlyph /></span>
-          <span className="dsh-quote-receipt-body">
-            <span className="dsh-quote-receipt-title">{quote.text}</span>
-            <span className="dsh-quote-receipt-sub">
-              {quote.source}
-              {quote.when === '' ? '' : ` · ${quote.when}`}
-            </span>
-          </span>
-          <button
-            type="button"
-            className="dsh-quote-receipt-close"
-            data-quote-dismiss={quote.id}
-            aria-label={DISMISS_LABEL}
-            onClick={() => onDismiss(quote.id)}
-          >×</button>
-        </div>
-      ))}
-    </div>
-  )
+export function selectRailQuotes(
+  staged: readonly RailQuote[],
+  submitted: Set<string>,
+): readonly RailQuote[] {
+  const reported = new Set(staged.map(quote => quote.id))
+  for (const id of submitted) if (!reported.has(id)) submitted.delete(id)
+  return staged.filter(quote => !submitted.has(quote.id))
 }
 
 /**
@@ -340,10 +307,25 @@ export function QuoteDock(props: QuoteDockProps): ReactElement | null {
   const [menuSize, setMenuSize] = useState<BoxSize>({ width: 0, height: 0 })
   const [copied, setCopied] = useState(false)
   const [pending, setPending] = useState<readonly RailQuote[]>([])
-  const [sent, setSent] = useState<readonly SentQuoteCard[]>([])
-  const [busy, setBusy] = useState(false)
-  /** Until this epoch ms, the pending poll must not overwrite the optimistic clear. */
-  const suppressPollUntil = useRef(0)
+  /**
+   * Ids of quotes the user has already submitted in this session.
+   *
+   * A submitted quote must never reappear as a removable draft, even though the
+   * host legitimately keeps it queued until its turn actually starts. A time
+   * window cannot express that (the wait is unbounded when the agent is busy), so
+   * the ids themselves are remembered instead.
+   */
+  const submittedRef = useRef<Set<string>>(new Set())
+  /**
+   * The live session id, readable from effects that must not re-subscribe.
+   *
+   * `sessionId` arrives as a property and can be absent on the first render, but
+   * the document-level send detector installs once and would otherwise close over
+   * whatever value that first render saw — leaving `api.claim` permanently
+   * skipped and the staged cards restored by the next poll.
+   */
+  const sessionIdRef = useRef<string | undefined>(sessionId)
+  sessionIdRef.current = sessionId
   const api: QuoteApi = createQuoteApi()
 
   /** Measure the rendered menu so placement can clamp against its real width. */
@@ -356,55 +338,60 @@ export function QuoteDock(props: QuoteDockProps): ReactElement | null {
       : { width, height }))
   }, [])
 
-  /** Refresh the session's pending quotes. */
+  /**
+   * Refresh the session's staged quotes from the host.
+   *
+   * The host is the authority on what is still staged. Quotes the user already
+   * sent are filtered out of the reply before it reaches state, so a poll that
+   * races the host's own drain can never put a submitted card back on screen.
+   */
   const refreshPending = (sid: string | undefined): void => {
     if (sid === undefined) return
-    // A send cleared the rail optimistically; do not undo that until the host has
-    // had its chance to drain the queue.
-    if (Date.now() < suppressPollUntil.current) return
     api.list(sid).then(
-      (list) => setPending(list),
+      (list) => setPending(current => {
+        const stillStaged = selectRailQuotes(list, submittedRef.current)
+        return stillStaged.length === current.length
+          && stillStaged.every((quote, index) => quote.id === current[index]?.id)
+          ? current
+          : stillStaged
+      }),
       (error) => console.warn('[dsh-quote] list pending failed:', error),
     )
   }
 
-  /** Refresh the receipt for quotes the host has already injected. */
-  const refreshSent = (sid: string | undefined): void => {
-    if (sid === undefined) return
-    api.sent(sid).then(
-      (list: readonly SentQuote[]) => setSent(list.map(quote => toSentQuoteCard(quote, sourceKindLabel(quote.sourceKind)))),
-      (error) => console.warn('[dsh-quote] list sent failed:', error),
-    )
-  }
-
-  /** Stop showing one receipt (it expired, or the user closed it). */
-  const dismissSent = (quoteId: string): void => {
-    if (sessionId === undefined) return
-    setSent(current => current.filter(card => card.id !== quoteId))
-    api.dismissSent(sessionId, quoteId).then(
-      () => undefined,
-      (error) => console.warn('[dsh-quote] dismiss sent failed:', error),
-    )
-  }
-
   /**
-   * Drop the staged cards as soon as the user sends, and tell the host they now
+   * Drop the staged cards the instant the user sends, and tell the host they now
    * belong to the message being sent.
    *
-   * Claiming on the host is what makes this stick. Hiding alone was not enough: a
-   * send made while the agent is busy starts no turn, so the quote stays pending
-   * — correctly — until the queued message is finally picked up, and the poll
-   * would show the card again for as long as the agent kept working. The user had
-   * already sent it, so it must not come back.
+   * Two things happen here, and they do different jobs:
    *
-   * The host keeps the quote so the fold can still inject it; `staged` simply
-   * stops reporting claimed quotes to the composer.
+   * - **Locally**, every currently-staged quote id is recorded in
+   *   {@link submittedRef} and the rail is cleared. This is what makes the card
+   *   disappear immediately AND stay gone. A send made while the agent is busy
+   *   starts no turn, so the quote legitimately stays pending on the host until
+   *   the queued message is picked up; without the local record the next poll
+   *   would faithfully restore the card and it would sit there for as long as the
+   *   agent kept working. That resurrection is the defect this fixes.
+   * - **On the host**, `claim` marks the quotes as already sent so its own `list`
+   *   stops reporting them. This is the authoritative half, and it is what lets
+   *   the local record be shed once the host agrees.
+   *
+   * The host keeps the quote itself so the fold still injects it; claiming only
+   * changes what the composer is shown.
    */
   const clearStagedOnSend = (): void => {
-    setPending((current) => (current.length === 0 ? current : []))
-    suppressPollUntil.current = Date.now() + SEND_GRACE_MS
-    if (sessionId === undefined) return
-    api.claim(sessionId).then(
+    setPending(current => {
+      for (const quote of current) submittedRef.current.add(quote.id)
+      return current.length === 0 ? current : []
+    })
+    // Read the live id: this runs from a long-lived effect whose closure would
+    // otherwise hold the (possibly absent) session id of the first render.
+    const sid = sessionIdRef.current
+    if (sid === undefined) {
+      console.warn('[dsh-quote] send detected with no session id; cannot claim')
+      return
+    }
+    api.claim(sid).then(
       () => undefined,
       (error) => console.warn('[dsh-quote] claim on send failed:', error),
     )
@@ -415,7 +402,6 @@ export function QuoteDock(props: QuoteDockProps): ReactElement | null {
   useEffect(() => {
     if (sessionId === undefined) return undefined
     refreshPending(sessionId)
-    refreshSent(sessionId)
     const timer = window.setInterval(() => refreshPending(sessionId), 2000)
     return () => window.clearInterval(timer)
   }, [sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -448,67 +434,35 @@ export function QuoteDock(props: QuoteDockProps): ReactElement | null {
     }
   }, [])
 
-  // Hide the staged cards the moment the user sends, and track whether a turn is
-  // running so the rail can explain a quote that has to wait.
+  // Clear the rail the moment the user presses send.
   //
-  // Detecting the send itself, not a turn transition: watching only for an
-  // idle→running edge missed every send made while the agent was already
-  // thinking, which is precisely when a staged card is most likely to be sitting
-  // there. The reliable, host-owned signal is the draft: pressing Enter submits
-  // the composer and empties its editable region, whether or not a turn was
-  // already in flight. This is read-only DOM observation; the composer's submit
-  // handler belongs to the host and is not reachable from a client plugin
-  // (client purity gate).
+  // The send itself is read from the composer's own DOM, because the composer's
+  // submit handler belongs to the host and is not reachable from a client plugin
+  // (client purity gate). Pressing Enter submits and empties the editable region,
+  // whether or not a turn was already in flight — so "draft had text, draft is
+  // now empty" is the one local edge that covers a send made mid-turn, which a
+  // turn-state edge cannot see.
+  //
+  // This is only the trigger. What makes the clear STICK is that the ids are
+  // recorded in `submittedRef` and filtered out of every later poll, so no race
+  // with the host can restore a card the user already sent.
   useEffect(() => {
     if (typeof document === 'undefined') return undefined
-    const readRunning = (): boolean =>
-      document.querySelector('[aria-label*="停止"], [data-turn-running]') !== null
     const readDraft = (): string => {
       const editor = document.querySelector('[contenteditable="true"][data-composer-input]')
       return editor?.textContent ?? ''
     }
-
-    let running = readRunning()
     let draft = readDraft()
-    setBusy(running)
-
     const observer = new MutationObserver(() => {
-      const nextRunning = readRunning()
-      if (nextRunning !== running) {
-        running = nextRunning
-        setBusy(nextRunning)
-      }
       const nextDraft = readDraft()
       if (nextDraft === draft) return
       const hadText = draft.trim() !== ''
       draft = nextDraft
-      // An emptied draft after real content is a submission. Clearing on this
-      // edge covers sends made mid-turn, which the turn-state edge cannot see.
       if (hadText && nextDraft.trim() === '') clearStagedOnSend()
     })
     observer.observe(document.body, { childList: true, subtree: true, characterData: true })
     return () => observer.disconnect()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Poll the host for what it has already injected. The pending rail clears
-  // when the fold drains the queue, and the receipt that replaces it tells the
-  // user their quote actually rode the message — the transcript will not, since
-  // the GUI hides ordinary injected-context rows entirely (ADR-0002).
-  useEffect(() => {
-    if (sessionId === undefined) return undefined
-    const timer = window.setInterval(() => refreshSent(sessionId), 2000)
-    return () => window.clearInterval(timer)
-  }, [sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Retire a receipt that has been up long enough to read.
-  useEffect(() => {
-    if (sent.length === 0) return undefined
-    const oldest = sent[0]
-    if (oldest === undefined) return undefined
-    const remaining = oldest.sentAt + RECEIPT_TTL_MS - Date.now()
-    const timer = window.setTimeout(() => { dismissSent(oldest.id) }, Math.max(remaining, 0))
-    return () => window.clearTimeout(timer)
-  }, [sent]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const addQuote = (candidate: QuoteCandidate): void => {
     setOffer(null)
@@ -580,8 +534,8 @@ export function QuoteDock(props: QuoteDockProps): ReactElement | null {
           </button>
         </div>
       )}
-      <QuoteRail quotes={pending} onRemove={removeQuote} busy={busy} />
-      <SentReceipt quotes={sent} onDismiss={dismissSent} />
+      <QuoteRail quotes={pending} onRemove={removeQuote} />
     </>
   )
 }
+

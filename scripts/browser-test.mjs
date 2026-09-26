@@ -2,16 +2,21 @@
  * Browser-automation acceptance for dsh-quote against a running DSH web GUI.
  *
  * Drives a REAL browser (Chrome) against a REAL `dsh --profile web` server and
- * asserts the user-visible surface end to end: the client bundle loads, mounts
- * into `conversation.input.overlay` inside the composer card, opens the
- * select→quote menu over a genuine transcript row, queues a quote through the
- * host HTTP bridge, renders the pending-quote card, removes it, and — on the
- * next real user turn — injects the quote as `quote-context` and shows the
- * composer receipt that confirms it rode the message.
+ * asserts the user-visible surface end to end, phrased as the three things the
+ * user must be able to do:
  *
- * Why a receipt and not a transcript card: the GUI filters ordinary
- * injected-context rows out of the transcript before any renderer runs, so that
- * row never exists to assert against. See docs/adr/0002-quote-visibility.md.
+ *   1. a quote staged with 「添加到对话」 shows as a card in the composer;
+ *   2. hitting send makes that card disappear IMMEDIATELY and it stays gone —
+ *      sampled for 60s, including the "agent is busy" case where the host
+ *      legitimately keeps the quote queued for a long time;
+ *   3. the quoted text arrives in the transcript as an ordinary user bubble,
+ *      positioned ABOVE the user's own message.
+ *
+ * The transcript assertion is the reason this plugin delivers a quote as a
+ * `source.kind: 'user'` message rather than a plugin-private injected-context
+ * row: the GUI filters ordinary context rows out before any renderer runs, so a
+ * private kind renders nowhere (ADR-0002), while a user message renders a normal
+ * bubble (ADR-0003).
  *
  * The host renders a first-run 「内测声明」 dialog that masks the composer; this
  * script dismisses it. That dialog belongs to DSH, not to dsh-quote.
@@ -176,7 +181,7 @@ try {
       await page.click('[data-dsh-quote-offer] button:has-text("添加到对话")')
       const rail = await page.waitForSelector('[data-dsh-quote-rail] [data-quote-id]', { timeout: 15_000 })
         .then(() => true).catch(() => false)
-      check('clicking 添加到对话 renders a pending-quote card', rail)
+      check('REQ1 clicking 添加到对话 renders a card in the chat window', rail)
 
       if (rail) {
         const detail = await page.evaluate(() => {
@@ -184,70 +189,97 @@ try {
           return {
             text: document.querySelector('[data-dsh-quote-rail] .dsh-quote-card-title')?.textContent ?? '',
             inOverlay: railEl?.closest('[data-slot="conversation.input.overlay"]') !== null,
+            inComposer: railEl?.closest('[data-composer-card]') !== null,
           }
         })
-        check('pending card lives inside conversation.input.overlay', detail.inOverlay)
-        check('pending card carries the selected text', detail.text.trim().length > 0, detail.text.slice(0, 40))
+        check('REQ1 the card sits inside the composer card', detail.inOverlay && detail.inComposer)
+        check('REQ1 the card carries the selected text', detail.text.trim().length > 0, detail.text.slice(0, 40))
 
-        // 8) Queue a quote for the ACTIVE session and send the next real turn:
-        //    the host fold injects it and the composer reports it back.
-        //
-        // The quote staged in step 7 is still pending — quotes accumulate and
-        // all of them ride the same turn (ADR-0001) — so this turn injects two
-        // and the assertions below address the one queued here by its id.
-        const injected = await page.evaluate(async (id) => {
+        // Mark the quote so it is identifiable in the transcript afterwards. The
+        // menu staged one already (quotes accumulate and all ride the same turn,
+        // ADR-0001); this second one carries the marker the assertions look for.
+        const MARKER = 'MARKER-引文正文-XYZ'
+        const injectedId = await page.evaluate(async ({ id, marker }) => {
           const res = await fetch(`/dsh-quote/api/quotes?sessionId=${encodeURIComponent(id)}`, {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ quote: { text: '这是被注入的引文正文', sourceKind: 'assistant' } }),
+            body: JSON.stringify({ quote: { text: marker, sourceKind: 'assistant' } }),
           })
           return (await res.json()).quote.id
-        }, activeSessionId)
+        }, { id: activeSessionId, marker: MARKER })
+        check('a marked quote is staged for the send', typeof injectedId === 'string' && injectedId.length > 0)
+
+        // ---- REQ2: the card must vanish on send, immediately, and stay gone ----
+        const OWN_MESSAGE = 'MARKER-我自己的问题-XYZ'
         await composer.click()
-        await page.keyboard.type('继续')
+        await page.keyboard.type(OWN_MESSAGE)
+        await page.waitForTimeout(300)
+        const sendAt = Date.now()
         await page.keyboard.press('Enter')
 
-        const receipt = await page.waitForSelector(
-          `[data-dsh-quote-receipt] [data-quote-id="${injected}"]`, { timeout: 120_000 },
-        ).then(() => true).catch(() => false)
-        check('sent-quote receipt appears in the composer', receipt)
-
-        if (receipt) {
-          const detail = await page.evaluate((quoteId) => {
-            const card = document.querySelector(`[data-dsh-quote-receipt] [data-quote-id="${quoteId}"]`)
-            return {
-              text: card?.querySelector('.dsh-quote-receipt-title')?.textContent ?? '',
-              inComposer: card?.closest('[data-composer-card]') !== null,
-              inOverlay: card?.closest('[data-slot="conversation.input.overlay"]') !== null,
-            }
-          }, injected)
-          check('receipt carries the injected text verbatim', detail.text.includes('这是被注入的引文正文'),
-            detail.text.slice(0, 40))
-          check('receipt lives inside the composer card', detail.inComposer && detail.inOverlay)
+        // Sample hard for the first few seconds: "immediately" is the requirement.
+        let clearedAt = null
+        for (let i = 0; i < 120; i += 1) {
+          const cards = await page.evaluate(() =>
+            document.querySelectorAll('[data-dsh-quote-rail] [data-quote-id]').length)
+          if (cards === 0) { clearedAt = Date.now() - sendAt; break }
+          await page.waitForTimeout(25)
         }
+        check('REQ2 the staged card disappears on send', clearedAt !== null,
+          clearedAt === null ? 'still visible after 3s' : `${clearedAt}ms`)
+        check('REQ2 it disappears immediately (<1000ms)', clearedAt !== null && clearedAt < 1000,
+          String(clearedAt))
 
-        // The GUI hides ordinary injected-context rows, so the transcript must
-        // NOT be relied on for this. Pin the fact rather than the absence of a
-        // card, so a host that starts rendering them is noticed, not silently
-        // tolerated (docs/adr/0002-quote-visibility.md).
+        // The card must not come back. This is the defect the user reported: a
+        // send made while the agent is busy starts no turn, so the host
+        // legitimately keeps the quote queued and a poll would restore the card.
+        // 60s covers a busy turn and several poll cycles.
+        let cameBack = false
+        for (let i = 0; i < 60; i += 1) {
+          await page.waitForTimeout(1000)
+          const cards = await page.evaluate(() =>
+            document.querySelectorAll('[data-dsh-quote-rail] [data-quote-id]').length)
+          if (cards > 0) { cameBack = true; break }
+        }
+        check('REQ2 the card does NOT come back within 60s', !cameBack)
+
+        // No receipt may take its place: a second card in the same slot was
+        // exactly what made the old build look like "the card never goes away".
+        const lingering = await page.evaluate(() => ({
+          rail: document.querySelectorAll('[data-dsh-quote-rail] [data-quote-id]').length,
+          receipt: document.querySelectorAll('[data-dsh-quote-receipt] [data-quote-id]').length,
+        }))
+        check('REQ2 nothing replaces the card in the composer',
+          lingering.rail === 0 && lingering.receipt === 0, JSON.stringify(lingering))
+
+        // ---- REQ3: the quote is a user message, above the user's own message ----
+        await page.waitForFunction(
+          (marker) => [...document.querySelectorAll('[data-chat-flow-kind="user"]')]
+            .some(row => (row.textContent ?? '').includes(marker)),
+          MARKER, { timeout: 120_000 },
+        ).then(() => true).catch(() => false)
+        const userRows = await page.evaluate(() =>
+          [...document.querySelectorAll('[data-chat-flow-kind="user"]')]
+            .map(row => (row.textContent ?? '').trim()))
+        const quoteIndex = userRows.findIndex(text => text.includes(MARKER))
+        const ownIndex = userRows.findIndex(text => text.includes(OWN_MESSAGE))
+        check('REQ3 the quote renders in the transcript as a user message', quoteIndex >= 0,
+          JSON.stringify(userRows.map(t => t.slice(0, 30))))
+        check('REQ3 the quote sits ABOVE the user\'s own message',
+          quoteIndex >= 0 && ownIndex >= 0 && quoteIndex < ownIndex,
+          `quote@${quoteIndex} own@${ownIndex}`)
+
+        // REQ3 holds only because the quote is delivered as source.kind 'user'.
+        // A private injected-context kind would render no row at all (ADR-0002).
         const contextRows = await page.evaluate(() =>
           document.querySelectorAll('[data-chat-flow-kind="context"]').length)
-        check('transcript renders no injected-context row (the ADR-0002 premise)',
-          contextRows === 0, `${contextRows} rows`)
-
-        const sent = await page.evaluate(async (id) =>
-          (await (await fetch(`/dsh-quote/api/sent?sessionId=${encodeURIComponent(id)}`)).json()).quotes,
-          activeSessionId)
-        check('host recorded this turn\'s quote as sent',
-          sent.some(quote => quote.id === injected && quote.text === '这是被注入的引文正文'),
-          JSON.stringify(sent))
-        check('both staged quotes rode the one turn (accumulate, not replace)',
-          sent.length === 2, `${sent.length} sent`)
+        check('the quote is not delivered as a hidden injected-context row',
+          contextRows === 0, `${contextRows} context rows`)
 
         const drained = await page.evaluate(async (id) =>
           (await (await fetch(`/dsh-quote/api/quotes?sessionId=${encodeURIComponent(id)}`)).json()).quotes,
           activeSessionId)
-        check('quote queue drained after injection (one-shot)', drained.length === 0, JSON.stringify(drained))
+        check('quote queue drained after delivery (one-shot)', drained.length === 0, JSON.stringify(drained))
       }
     }
   }
