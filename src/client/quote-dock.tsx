@@ -264,30 +264,32 @@ export function QuoteRail(props: {
 }
 
 /**
- * Filter a host "staged quotes" reply down to what the rail may show, and prune
- * the submitted-id record.
+ * Whether a keyboard event is a composer SUBMIT rather than an insertion.
  *
- * This is the rule that makes requirement 2 hold: a quote the user has already
- * submitted must never reappear as a removable draft, however the poll races the
- * host's own drain. A send made while the agent is busy starts no turn, so the
- * host legitimately keeps reporting the quote as staged for as long as the agent
- * works — a time-based suppression cannot cover that, an id-based one can.
+ * This exists because the previous "the draft went empty" heuristic could not
+ * tell a submit from the user deleting their own draft, and the difference
+ * matters: misreading a deletion as a send hid a quote that was still pending and
+ * about to be injected on the next real message.
  *
- * The record is pruned of ids the host no longer reports at all, so it stays
- * proportional to what is actually in flight rather than growing all session.
- * An id the host STILL reports is deliberately kept: that is precisely the
- * "claimed but not yet drained" state the card must stay hidden through.
- * @param staged - the quotes the host reports as staged.
- * @param submitted - the mutable record of ids already submitted this session.
- * @returns the quotes the rail should render.
+ * Shift+Enter inserts a newline; Alt/Ctrl/Meta+Enter are bound to other actions
+ * by the composer; `isComposing` marks an IME confirmation, which also reports
+ * Enter but is still text entry.
+ * @param event - the keydown event to classify.
  */
-export function selectRailQuotes(
-  staged: readonly RailQuote[],
-  submitted: Set<string>,
-): readonly RailQuote[] {
-  const reported = new Set(staged.map(quote => quote.id))
-  for (const id of submitted) if (!reported.has(id)) submitted.delete(id)
-  return staged.filter(quote => !submitted.has(quote.id))
+export function isSubmitKeyEvent(event: {
+  key?: string
+  shiftKey?: boolean
+  altKey?: boolean
+  ctrlKey?: boolean
+  metaKey?: boolean
+  isComposing?: boolean
+}): boolean {
+  return event.key === 'Enter'
+    && event.shiftKey !== true
+    && event.altKey !== true
+    && event.ctrlKey !== true
+    && event.metaKey !== true
+    && event.isComposing !== true
 }
 
 /**
@@ -308,21 +310,12 @@ export function QuoteDock(props: QuoteDockProps): ReactElement | null {
   const [copied, setCopied] = useState(false)
   const [pending, setPending] = useState<readonly RailQuote[]>([])
   /**
-   * Ids of quotes the user has already submitted in this session.
-   *
-   * A submitted quote must never reappear as a removable draft, even though the
-   * host legitimately keeps it queued until its turn actually starts. A time
-   * window cannot express that (the wait is unbounded when the agent is busy), so
-   * the ids themselves are remembered instead.
-   */
-  const submittedRef = useRef<Set<string>>(new Set())
-  /**
    * The live session id, readable from effects that must not re-subscribe.
    *
    * `sessionId` arrives as a property and can be absent on the first render, but
-   * the document-level send detector installs once and would otherwise close over
-   * whatever value that first render saw — leaving `api.claim` permanently
-   * skipped and the staged cards restored by the next poll.
+   * the document-level submit detector installs once and would otherwise close
+   * over whatever value that first render saw — leaving `api.claim` permanently
+   * skipped.
    */
   const sessionIdRef = useRef<string | undefined>(sessionId)
   sessionIdRef.current = sessionId
@@ -341,58 +334,44 @@ export function QuoteDock(props: QuoteDockProps): ReactElement | null {
   /**
    * Refresh the session's staged quotes from the host.
    *
-   * The host is the authority on what is still staged. Quotes the user already
-   * sent are filtered out of the reply before it reaches state, so a poll that
-   * races the host's own drain can never put a submitted card back on screen.
+   * The host is the SOLE authority on what is still staged: it reports a quote
+   * only until its own `claim` fires on a real inbox insert. The client keeps no
+   * local record of "already submitted" ids — that record was what turned a
+   * misread draft-clear into a permanently hidden quote.
    */
   const refreshPending = (sid: string | undefined): void => {
     if (sid === undefined) return
     api.list(sid).then(
-      (list) => setPending(current => {
-        const stillStaged = selectRailQuotes(list, submittedRef.current)
-        return stillStaged.length === current.length
-          && stillStaged.every((quote, index) => quote.id === current[index]?.id)
+      (list) => setPending(current => (
+        list.length === current.length
+          && list.every((quote, index) => quote.id === current[index]?.id)
           ? current
-          : stillStaged
-      }),
+          : list
+      )),
       (error) => console.warn('[dsh-quote] list pending failed:', error),
     )
   }
 
   /**
-   * Drop the staged cards the instant the user sends, and tell the host they now
-   * belong to the message being sent.
+   * Ask the host to mark the session's staged quotes as submitted.
    *
-   * Two things happen here, and they do different jobs:
+   * Called when the composer reports a SUBMIT, which is the only local signal
+   * available. It is deliberately NOT the authority on what was sent: the host
+   * decides that itself on `agent/inbox/inserted`, and this call only makes the
+   * composer's own view agree a little sooner. A call that should not have
+   * happened is therefore self-correcting — the host simply has nothing to claim.
    *
-   * - **Locally**, every currently-staged quote id is recorded in
-   *   {@link submittedRef} and the rail is cleared. This is what makes the card
-   *   disappear immediately AND stay gone. A send made while the agent is busy
-   *   starts no turn, so the quote legitimately stays pending on the host until
-   *   the queued message is picked up; without the local record the next poll
-   *   would faithfully restore the card and it would sit there for as long as the
-   *   agent kept working. That resurrection is the defect this fixes.
-   * - **On the host**, `claim` marks the quotes as already sent so its own `list`
-   *   stops reporting them. This is the authoritative half, and it is what lets
-   *   the local record be shed once the host agrees.
-   *
-   * The host keeps the quote itself so the fold still injects it; claiming only
-   * changes what the composer is shown.
+   * The card is NOT cleared here. Clearing is driven by the host's reply (see
+   * `refreshPending`), because a client-side guess cannot tell a submit from a
+   * deletion and getting it wrong hides a quote that is still going to be sent.
    */
-  const clearStagedOnSend = (): void => {
-    setPending(current => {
-      for (const quote of current) submittedRef.current.add(quote.id)
-      return current.length === 0 ? current : []
-    })
+  const claimStaged = (): void => {
     // Read the live id: this runs from a long-lived effect whose closure would
     // otherwise hold the (possibly absent) session id of the first render.
     const sid = sessionIdRef.current
-    if (sid === undefined) {
-      console.warn('[dsh-quote] send detected with no session id; cannot claim')
-      return
-    }
+    if (sid === undefined) return
     api.claim(sid).then(
-      () => undefined,
+      () => refreshPending(sid),
       (error) => console.warn('[dsh-quote] claim on send failed:', error),
     )
   }
@@ -434,34 +413,60 @@ export function QuoteDock(props: QuoteDockProps): ReactElement | null {
     }
   }, [])
 
-  // Clear the rail the moment the user presses send.
+  // Ask the host to claim the staged quotes when the user submits.
   //
-  // The send itself is read from the composer's own DOM, because the composer's
-  // submit handler belongs to the host and is not reachable from a client plugin
-  // (client purity gate). Pressing Enter submits and empties the editable region,
-  // whether or not a turn was already in flight — so "draft had text, draft is
-  // now empty" is the one local edge that covers a send made mid-turn, which a
-  // turn-state edge cannot see.
+  // A SUBMIT is inferred from the keystroke that causes it, not from the draft
+  // merely going empty. The earlier revision watched only "draft had text, draft
+  // is now empty", which cannot tell a submit from the user DELETING their own
+  // draft — both empty the editor. A deletion was therefore read as a send, and
+  // because that path also recorded the quote ids as submitted, the card vanished
+  // for good while the host still held the quote and injected it on the next real
+  // message. The user saw no card and had no way to know a quote was still
+  // pending. Pinning the trigger to Enter (and the send button) removes the
+  // ambiguity at its source.
   //
-  // This is only the trigger. What makes the clear STICK is that the ids are
-  // recorded in `submittedRef` and filtered out of every later poll, so no race
-  // with the host can restore a card the user already sent.
+  // This is still only a hint: `claim` is idempotent and the host owns the real
+  // decision on `agent/inbox/inserted`. A spurious call finds nothing to claim,
+  // and a missed one is corrected by the host's own claim.
   useEffect(() => {
     if (typeof document === 'undefined') return undefined
-    const readDraft = (): string => {
-      const editor = document.querySelector('[contenteditable="true"][data-composer-input]')
-      return editor?.textContent ?? ''
-    }
-    let draft = readDraft()
-    const observer = new MutationObserver(() => {
-      const nextDraft = readDraft()
-      if (nextDraft === draft) return
-      const hadText = draft.trim() !== ''
-      draft = nextDraft
-      if (hadText && nextDraft.trim() === '') clearStagedOnSend()
+
+    /** Whether a keyboard event is a composer submit rather than an insertion. */
+    const isSubmitKey = (event: KeyboardEvent): boolean => isSubmitKeyEvent({
+      key: event.key,
+      shiftKey: event.shiftKey,
+      altKey: event.altKey,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+      isComposing: event.isComposing,
     })
-    observer.observe(document.body, { childList: true, subtree: true, characterData: true })
-    return () => observer.disconnect()
+
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (!isSubmitKey(event)) return
+      const target = event.target
+      if (!(target instanceof Element)) return
+      if (target.closest('[contenteditable="true"][data-composer-input]') === null) return
+      claimStaged()
+    }
+
+    // The send button submits without a key event. Detected by its own control
+    // rather than by the draft emptying, for the same reason as above.
+    const onClick = (event: MouseEvent): void => {
+      const target = event.target
+      if (!(target instanceof Element)) return
+      const button = target.closest('button')
+      if (button === null) return
+      if (button.closest('[data-composer-card]') === null) return
+      if (!/发送/.test(button.getAttribute('aria-label') ?? '')) return
+      claimStaged()
+    }
+
+    document.addEventListener('keydown', onKeyDown, true)
+    document.addEventListener('click', onClick, true)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown, true)
+      document.removeEventListener('click', onClick, true)
+    }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const addQuote = (candidate: QuoteCandidate): void => {

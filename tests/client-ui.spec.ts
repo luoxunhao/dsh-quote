@@ -1,11 +1,10 @@
 /**
  * @vitest-environment jsdom
  * dsh-quote client presentation tests: the selection-menu placement, the
- * source-row label shown on a quote chip, the pending-quote rail markup, and the
- * rule that keeps a submitted quote from reappearing — the two surfaces this
- * plugin owns in the composer, plus the send-clear rule behind them. The
- * transcript needs no assertion here: a quote is an ordinary user message and
- * the GUI renders its bubble by itself (see docs/adr/0003-quote-as-user-message.md).
+ * source-row label shown on a quote chip, and the pending-quote rail markup —
+ * the surfaces this plugin owns in the composer. The transcript needs no
+ * assertion here: a quote renders through this plugin's own Chat node definition
+ * (see docs/adr/0004-quote-as-own-chat-node.md).
  * Components render through react-dom/server so the assertions read the
  * committed DOM shape without a test-only renderer dependency.
  */
@@ -13,7 +12,7 @@ import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createElement } from 'react'
 
-import { QuoteRail, menuPosition, selectRailQuotes, sourceKindLabel } from '../src/client/quote-dock.tsx'
+import { QuoteRail, isSubmitKeyEvent, menuPosition, sourceKindLabel } from '../src/client/quote-dock.tsx'
 
 const VIEWPORT = { width: 1200, height: 800 }
 const MENU_SIZE = { width: 160, height: 32 }
@@ -121,35 +120,42 @@ describe('QuoteRail', () => {
   })
 })
 
-describe('selectRailQuotes (requirement: a sent card must not come back)', () => {
-  const staged = [
-    { id: 'q1', text: '已提交的引文' },
-    { id: 'q2', text: '还没发的引文' },
-  ]
+describe('isSubmitKeyEvent (submit must not be confused with a deletion)', () => {
+  // Regression: the rail used to clear on "the draft had text and is now empty",
+  // which fires just as well when the user DELETES their draft. That misread hid
+  // the quote card permanently (the ids were also recorded as submitted) while the
+  // host still held the quote and injected it on the next real message — so the
+  // user saw no card and accumulated invisible quotes. Pinning the trigger to the
+  // submit keystroke removes the ambiguity at its source.
 
-  it('hides a submitted quote the host still reports as staged', () => {
-    // This is the exact state a send-while-busy produces: the user submitted, but
-    // the host has not drained the queue because no turn has started yet. The
-    // card must stay gone for the whole (unbounded) wait.
-    const submitted = new Set(['q1'])
-    const visible = selectRailQuotes(staged, submitted)
-    expect(visible.map(q => q.id)).toEqual(['q2'])
-    // ...and the record is KEPT, so the next poll hides it again.
-    expect(submitted.has('q1')).toBe(true)
-    expect(selectRailQuotes(staged, submitted).map(q => q.id)).toEqual(['q2'])
+  it('accepts a bare Enter, which is what submits', () => {
+    expect(isSubmitKeyEvent({ key: 'Enter' })).toBe(true)
   })
 
-  it('prunes ids the host no longer reports, so the record stays bounded', () => {
-    const submitted = new Set(['q1', 'gone'])
-    selectRailQuotes(staged, submitted)
-    expect([...submitted]).toEqual(['q1'])
+  it('rejects Enter with a modifier, which the composer binds elsewhere', () => {
+    expect(isSubmitKeyEvent({ key: 'Enter', shiftKey: true })).toBe(false)
+    expect(isSubmitKeyEvent({ key: 'Enter', altKey: true })).toBe(false)
+    expect(isSubmitKeyEvent({ key: 'Enter', ctrlKey: true })).toBe(false)
+    expect(isSubmitKeyEvent({ key: 'Enter', metaKey: true })).toBe(false)
   })
 
-  it('shows everything when nothing has been submitted', () => {
-    expect(selectRailQuotes(staged, new Set()).map(q => q.id)).toEqual(['q1', 'q2'])
+  it('rejects an IME confirmation, which also reports Enter but is text entry', () => {
+    expect(isSubmitKeyEvent({ key: 'Enter', isComposing: true })).toBe(false)
   })
 
-  it('empties the rail once every staged quote has been submitted', () => {
-    expect(selectRailQuotes(staged, new Set(['q1', 'q2']))).toEqual([])
+  it('rejects the keys a deletion is made of', () => {
+    // These are the events that emptied the draft in the reported bug. None of
+    // them may be read as a submit.
+    for (const key of ['Backspace', 'Delete', 'a', 'Escape', ' ']) {
+      expect(isSubmitKeyEvent({ key })).toBe(false)
+    }
+  })
+
+  it('rejects a selection-replacing keystroke that empties the draft', () => {
+    // Ctrl+A then Backspace is a common way to clear the composer before typing
+    // something else; neither half is a submit.
+    expect(isSubmitKeyEvent({ key: 'a', ctrlKey: true })).toBe(false)
+    expect(isSubmitKeyEvent({ key: 'Backspace' })).toBe(false)
   })
 })
+

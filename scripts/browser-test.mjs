@@ -217,6 +217,44 @@ try {
         await composer.click()
         await page.keyboard.type(OWN_MESSAGE)
         await page.waitForTimeout(300)
+
+        // ---- REGRESSION: deleting a draft must NOT look like a send ----
+        //
+        // The rail used to clear on "the draft had text and is now empty", which
+        // fires just as well when the user deletes their own draft. That misread
+        // hid the card permanently (the ids were also recorded as submitted) while
+        // the host still held the quote — so the user saw no card, staged more
+        // quotes, and silently accumulated invisible ones that all rode the next
+        // real message.
+        const stagedBefore = await page.evaluate(() =>
+          document.querySelectorAll('[data-dsh-quote-rail] [data-quote-id]').length)
+        await page.keyboard.press('Backspace')
+        await page.waitForTimeout(200)
+        // Clear the rest of the draft, then confirm the card survived.
+        for (let i = 0; i < 60; i += 1) await page.keyboard.press('Backspace')
+        await page.waitForTimeout(1500)
+        const afterDelete = await page.evaluate(() => ({
+          rail: document.querySelectorAll('[data-dsh-quote-rail] [data-quote-id]').length,
+          draft: document.querySelector('[contenteditable="true"][data-composer-input]')?.textContent ?? '',
+        }))
+        // The invariant is that the delete did not REMOVE a card. The count may
+        // legitimately grow between the reads (a poll can land the separately
+        // staged MARKER quote), so assert non-loss rather than equality.
+        check('REGRESSION deleting the draft keeps the staged card visible',
+          stagedBefore > 0 && afterDelete.rail >= stagedBefore,
+          `before=${stagedBefore} after=${afterDelete.rail} draft=${JSON.stringify(afterDelete.draft.trim().slice(0, 20))}`)
+
+        // The host must still hold the quote too, or the card is showing a lie.
+        const stillStaged = await page.evaluate(async (id) =>
+          (await (await fetch(`/dsh-quote/api/quotes?sessionId=${encodeURIComponent(id)}`)).json()).quotes.length,
+          activeSessionId)
+        check('REGRESSION the host still reports the quote as staged after the delete',
+          stillStaged > 0, `${stillStaged} staged`)
+
+        // Now re-type and actually send, which is the case REQ2 measures.
+        await composer.click()
+        await page.keyboard.type(OWN_MESSAGE)
+        await page.waitForTimeout(300)
         const sendAt = Date.now()
         await page.keyboard.press('Enter')
 
