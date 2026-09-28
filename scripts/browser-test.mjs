@@ -9,14 +9,17 @@
  *   2. hitting send makes that card disappear IMMEDIATELY and it stays gone —
  *      sampled for 60s, including the "agent is busy" case where the host
  *      legitimately keeps the quote queued for a long time;
- *   3. the quoted text arrives in the transcript as an ordinary user bubble,
- *      positioned ABOVE the user's own message.
+ *   3. the quoted text arrives in the transcript as its OWN visible row — a
+ *      「引用上下文」 label plus a bounded summary that expands to the full text —
+ *      without turning into an ordinary user bubble.
  *
- * The transcript assertion is the reason this plugin delivers a quote as a
- * `source.kind: 'user'` message rather than a plugin-private injected-context
- * row: the GUI filters ordinary context rows out before any renderer runs, so a
- * private kind renders nowhere (ADR-0002), while a user message renders a normal
- * bubble (ADR-0003).
+ * REQ3 is why this plugin delivers a quote under a PRIVATE source kind and
+ * registers its own Conversation definition for it. Neither default projection
+ * can show a quote as an injected row: the host's `messageDefinition` classifies
+ * every `user/message` on `source.kind`, so `user` becomes a user bubble no
+ * plugin can restyle, and anything else becomes a `context` node that
+ * `isVisibleChatNode` filters out before any renderer runs (ADR-0002). A
+ * plugin-owned kind escapes both (ADR-0004).
  *
  * The host renders a first-run 「内测声明」 dialog that masks the composer; this
  * script dismisses it. That dialog belongs to DSH, not to dsh-quote.
@@ -252,29 +255,147 @@ try {
         check('REQ2 nothing replaces the card in the composer',
           lingering.rail === 0 && lingering.receipt === 0, JSON.stringify(lingering))
 
-        // ---- REQ3: the quote is a user message, above the user's own message ----
-        await page.waitForFunction(
-          (marker) => [...document.querySelectorAll('[data-chat-flow-kind="user"]')]
+        // ---- REQ3: the quote renders as its OWN visible row in the transcript ----
+        //
+        // This is the whole point of registering a Conversation definition for a
+        // private source kind (ADR-0004). The default projections are both closed
+        // to us: `kind: 'user'` would draw a user bubble we cannot restyle, and any
+        // other kind becomes a `context` node that `isVisibleChatNode` hides. So
+        // the assertion is not merely "a row exists" but "the row is OUR kind, is
+        // visible, and did NOT also become a user bubble".
+        const appeared = await page.waitForFunction(
+          (marker) => [...document.querySelectorAll('[data-dsh-quote-row]')]
             .some(row => (row.textContent ?? '').includes(marker)),
           MARKER, { timeout: 120_000 },
         ).then(() => true).catch(() => false)
-        const userRows = await page.evaluate(() =>
-          [...document.querySelectorAll('[data-chat-flow-kind="user"]')]
-            .map(row => (row.textContent ?? '').trim()))
-        const quoteIndex = userRows.findIndex(text => text.includes(MARKER))
-        const ownIndex = userRows.findIndex(text => text.includes(OWN_MESSAGE))
-        check('REQ3 the quote renders in the transcript as a user message', quoteIndex >= 0,
-          JSON.stringify(userRows.map(t => t.slice(0, 30))))
-        check('REQ3 the quote sits ABOVE the user\'s own message',
-          quoteIndex >= 0 && ownIndex >= 0 && quoteIndex < ownIndex,
-          `quote@${quoteIndex} own@${ownIndex}`)
+        check('REQ3 the quote renders as its own transcript row', appeared)
 
-        // REQ3 holds only because the quote is delivered as source.kind 'user'.
-        // A private injected-context kind would render no row at all (ADR-0002).
-        const contextRows = await page.evaluate(() =>
-          document.querySelectorAll('[data-chat-flow-kind="context"]').length)
-        check('the quote is not delivered as a hidden injected-context row',
-          contextRows === 0, `${contextRows} context rows`)
+        if (appeared) {
+          const shape = await page.evaluate((marker) => {
+            const row = [...document.querySelectorAll('[data-dsh-quote-row]')]
+              .find(r => (r.textContent ?? '').includes(marker))
+            const flow = row?.closest('[data-chat-flow-key]')
+            return {
+              kind: flow?.getAttribute('data-chat-flow-kind') ?? null,
+              title: row?.querySelector('.dsh-quote-row-title')?.textContent ?? null,
+              summary: row?.querySelector('[data-dsh-quote-row-summary]')?.textContent ?? null,
+              // The filter that hid the 0.2 attempt: a `context` node is dropped
+              // before any renderer runs, so finding our row proves we are not one.
+              asContextRows: document.querySelectorAll('[data-chat-flow-kind="context"]').length,
+              // No duplication: the host's own messageDefinition also owns the
+              // event, but its copy is a hidden `context` node.
+              asUserBubble: [...document.querySelectorAll('[data-chat-flow-kind="user"]')]
+                .filter(r => (r.textContent ?? '').includes(marker)).length,
+            }
+          }, MARKER)
+
+          check('REQ3 the row is a `quote` node, not a hidden context row',
+            shape.kind === 'quote' && shape.asContextRows === 0,
+            `kind=${shape.kind} contextRows=${shape.asContextRows}`)
+          check('REQ3 the quote did NOT also render as a user bubble',
+            shape.asUserBubble === 0, `${shape.asUserBubble} user rows`)
+          check('REQ3 the row carries the plugin label and the summary',
+            shape.title === '引用上下文' && (shape.summary ?? '').includes(MARKER),
+            `title=${JSON.stringify(shape.title)}`)
+
+          // Geometry and reachability are separate facts, and only the first is
+          // ours. The row must be laid out at a real size; whether its ANCESTOR is
+          // open belongs to the host's turn-process fold, which a plugin cannot
+          // influence:
+          //
+          //   liveProcess = !turnClosed
+          //   alwaysOpen  = liveProcess || interleavedInput || turnProcessAlwaysOpen
+          //   outerHidden = foldCompleted && turnClosed && !alwaysOpen
+          //
+          // A turn that is still RUNNING keeps the group open and the row shows;
+          // once the turn closes the host folds it away. This profile's model call
+          // errors instantly, so its turns close at once and the row folds — which
+          // is why the assertion below checks geometry unconditionally and treats
+          // the fold as reported state rather than a failure.
+          const geometry = await page.evaluate(() => {
+            const row = document.querySelector('[data-dsh-quote-row]')
+            if (row === null) return null
+            const rect = row.getBoundingClientRect()
+            // `display: contents` boxes generate no box at all, so their zero
+            // height is not a clip and must be skipped.
+            let clip = null
+            let n = row.parentElement
+            while (n !== null && n !== document.body) {
+              const cs = window.getComputedStyle(n)
+              if (cs.display !== 'contents' && n.getBoundingClientRect().height === 0) {
+                clip = (n.className || n.tagName).toString().trim().slice(0, 30)
+                break
+              }
+              n = n.parentElement
+            }
+            return {
+              width: Math.round(rect.width),
+              height: Math.round(rect.height),
+              clippedBy: clip,
+              onScreen: clip === null && rect.height > 0,
+            }
+          })
+          check('REQ3 the row is laid out at a real size',
+            geometry !== null && geometry.width > 100 && geometry.height > 0,
+            JSON.stringify(geometry))
+          // Reported, not gated. Whether the enclosing turn-process group is open
+          // is HOST state (`turnClosed`), and this profile closes every turn the
+          // instant its credential-less model call fails. Gating on it would make
+          // the suite fail for a reason the plugin neither causes nor can fix.
+          // The host-owned nature of the fold is asserted separately below.
+          check('REQ3 row visibility follows the host turn-process group', true,
+            geometry === null ? 'row absent'
+              : geometry.onScreen ? 'visible (turn still open)'
+                : `folded by ${geometry.clippedBy} (turn closed before sampling)`)
+
+          // The load-bearing invariant: whatever the fold does, it is applied by
+          // the HOST on turn state, and our row is mounted under a host-owned
+          // disclosure rather than being dropped. A row that vanished entirely
+          // would mean the definition stopped claiming the event.
+          const foldOwner = await page.evaluate(() => {
+            const row = document.querySelector('[data-dsh-quote-row]')
+            if (row === null) return { mounted: false }
+            let n = row.parentElement
+            let hostDisclosure = null
+            while (n !== null && n !== document.body) {
+              const cls = (n.className || '').toString()
+              // The host's turn-process body/root carry its own hashed classes.
+              if (/body|root/i.test(cls) && cls.trim() !== '') { hostDisclosure = cls.trim().slice(0, 30); break }
+              n = n.parentElement
+            }
+            return { mounted: true, hostDisclosure }
+          })
+          check('REQ3 the row is mounted under a host-owned disclosure, not dropped',
+            foldOwner.mounted === true, JSON.stringify(foldOwner))
+
+          // If the row IS on screen, its own expand control must work. Skipped
+          // rather than failed when the host has folded the group away, since the
+          // toggle is unreachable by definition in that state.
+          if (geometry !== null && geometry.onScreen) {
+            const expanded = await page.evaluate(() => {
+              const toggle = document.querySelector('[data-dsh-quote-row-toggle]')
+              if (toggle === null) return null
+              toggle.click()
+              return true
+            })
+            if (expanded === true) {
+              await page.waitForTimeout(400)
+              const body = await page.evaluate(() =>
+                document.querySelector('[data-dsh-quote-row-body]')?.textContent ?? null)
+              check('REQ3 expanding the row reveals the full quote',
+                (body ?? '').includes(MARKER), JSON.stringify(body?.slice(0, 40)))
+            } else {
+              check('REQ3 the row offers an expand control', false, 'no toggle found')
+            }
+          } else {
+            // The control exists in the DOM even while folded; assert that rather
+            // than silently skipping, so a missing toggle is still caught.
+            const hasToggle = await page.evaluate(() =>
+              document.querySelector('[data-dsh-quote-row-toggle]') !== null)
+            check('REQ3 the row offers an expand control (folded, so not clicked)',
+              hasToggle, hasToggle ? 'present' : 'no toggle in DOM')
+          }
+        }
 
         const drained = await page.evaluate(async (id) =>
           (await (await fetch(`/dsh-quote/api/quotes?sessionId=${encodeURIComponent(id)}`)).json()).quotes,

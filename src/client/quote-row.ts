@@ -36,7 +36,7 @@
 export const QUOTE_NODE_KIND = 'quote'
 
 /** Minimal event face the definition reads. */
-interface EventLike {
+export interface EventLike {
   readonly type?: string
   readonly seq?: number
   readonly time?: number
@@ -49,7 +49,7 @@ interface EventLike {
 }
 
 /** Minimal view-node face this plugin builds. */
-interface QuoteViewNode {
+export interface QuoteViewNode {
   readonly key: string
   readonly kind: string
   readonly id: string
@@ -61,7 +61,7 @@ interface QuoteViewNode {
 }
 
 /** The state one claimed quote carries between start and publication. */
-interface QuoteState {
+export interface QuoteState {
   readonly id: string
   readonly seq: number
   readonly summary: string
@@ -84,6 +84,25 @@ function isAppendSurfaceEvent(event: EventLike): boolean {
   return event.surfaceOp === 'append'
 }
 
+/** The definition surface this plugin registers (structural subset of the contract). */
+export interface QuoteDefinition {
+  readonly kind: string
+  readonly target: string
+  /** Claim one event, or null when it is not this plugin's quote. */
+  match(event: EventLike): { id: string; role: 'start' } | null
+  /** Adopt the claim's business state. */
+  start(context: unknown, match: { event: EventLike }): QuoteState
+  /** Apply a later match; a quote is a single event, so this is identity. */
+  update(context: { state?: QuoteState }): QuoteState
+  /** Publish the visible node, or null while the state is unavailable. */
+  buildViewNode(context: {
+    state?: QuoteState
+    key: string
+    id: string
+    start?: { location: unknown }
+  }): QuoteViewNode | null
+}
+
 /**
  * The quote definition, matching only THIS plugin's injected messages.
  *
@@ -93,7 +112,7 @@ function isAppendSurfaceEvent(event: EventLike): boolean {
  * visibility filter drops, so exactly one visible row results.
  * @param kind - the source kind stamped by the host half.
  */
-export function createQuoteDefinition(kind: string): unknown {
+export function createQuoteDefinition(kind: string): QuoteDefinition {
   return {
     kind: QUOTE_NODE_KIND,
     target: 'chat',
