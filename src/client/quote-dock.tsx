@@ -146,23 +146,47 @@ export function railSourceLabel(quote: { sourceKind?: string; filePath?: string 
 }
 
 /**
- * Place the selection menu: centered on the selection's horizontal midpoint,
- * above it when there is room and below it otherwise, clamped so a measured
- * menu never leaves the viewport.
+ * Place the selection menu inside the viewport.
+ *
+ * Preferred position: centered on the selection's midpoint, above it when there
+ * is room, below it otherwise.
+ *
+ * BOTH axes are clamped. Only the horizontal one used to be, and that produced a
+ * menu the user could see but not click: when a selection sat near the bottom of
+ * a scrollable area — which is the normal case in the sidebar's file viewer — the
+ * "no room above, so go below" branch put the menu past the bottom edge with
+ * nothing to correct it.
+ *
+ * The clamp is also what makes a zero measurement safe: before the first
+ * measurement `size` is `{0,0}`, so the menu is placed as if it were a point and
+ * then re-placed once its real size is known. Clamping on both axes means the
+ * intermediate frame is on-screen too, instead of flashing outside it.
  * @param box - the selection's viewport rect.
  * @param size - the menu's measured size; zero before the first measurement.
  * @param viewport - the window's inner size.
  */
 export function menuPosition(box: ClientBox, size: BoxSize, viewport: BoxSize): MenuPosition {
-  const center = (box.left + box.right) / 2
   const halfWidth = size.width / 2
-  const min = MENU_OFFSET + halfWidth
-  const max = viewport.width - MENU_OFFSET - halfWidth
-  const x = max < min ? viewport.width / 2 : Math.min(Math.max(center, min), max)
+  const minX = MENU_OFFSET + halfWidth
+  const maxX = viewport.width - MENU_OFFSET - halfWidth
+  const center = (box.left + box.right) / 2
+  const x = maxX < minX ? viewport.width / 2 : Math.min(Math.max(center, minX), maxX)
+
+  // Vertical: prefer above, fall back to below, and clamp either way so the menu
+  // cannot leave the viewport no matter how the selection is positioned.
   const aboveY = box.top - MENU_OFFSET
-  return aboveY - size.height < MENU_OFFSET
-    ? { x, y: box.bottom + MENU_OFFSET, placement: 'below' }
-    : { x, y: aboveY, placement: 'above' }
+  const fitsAbove = aboveY - size.height >= MENU_OFFSET
+  const preferredY = fitsAbove ? aboveY : box.bottom + MENU_OFFSET
+  const placement: 'above' | 'below' = fitsAbove ? 'above' : 'below'
+
+  // Convert the preferred anchor into the menu's own top edge and clamp that.
+  const top = placement === 'above' ? preferredY - size.height : preferredY
+  const maxTop = Math.max(viewport.height - size.height - MENU_OFFSET, MENU_OFFSET)
+  const clampedTop = Math.min(Math.max(top, MENU_OFFSET), maxTop)
+
+  // Give back the anchor the CSS transform expects for this placement.
+  const y = placement === 'above' ? clampedTop + size.height : clampedTop
+  return { x, y, placement }
 }
 
 /**

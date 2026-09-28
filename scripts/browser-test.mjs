@@ -593,6 +593,30 @@ try {
       const offered = await page.evaluate(() => document.querySelector('[data-dsh-quote-offer]') !== null)
       check('SIDEBAR the quote menu opens for a file selection', offered)
 
+      // The menu must be INSIDE the viewport AND actually clickable. A menu that
+      // renders past the bottom edge is visible but unreachable, which is exactly
+      // what happened before both axes were clamped: only X was, so a selection
+      // with no room above AND none below got a menu below the fold.
+      const placement = await page.evaluate(() => {
+        const el = document.querySelector('[data-dsh-quote-offer]')
+        if (el === null) return { present: false }
+        const r = el.getBoundingClientRect()
+        const hit = document.elementFromPoint(
+          Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2))
+        return {
+          present: true,
+          rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+          insideX: r.left >= 0 && r.right <= window.innerWidth,
+          insideY: r.top >= 0 && r.bottom <= window.innerHeight,
+          clickable: hit !== null && hit.closest('[data-dsh-quote-offer]') !== null,
+        }
+      })
+      check('SIDEBAR the menu stays inside the viewport',
+        placement.present && placement.insideX && placement.insideY,
+        JSON.stringify(placement.rect))
+      check('SIDEBAR the menu is clickable (topmost at its own centre)',
+        placement.present && placement.clickable, JSON.stringify(placement.rect))
+
       if (offered && picked.length > 0) {
         // Clicked through the real menu. The menu is PORTALED to <body>: while it
         // lived inside the composer card, an open right sidebar covered it and

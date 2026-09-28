@@ -45,6 +45,56 @@ describe('menuPosition', () => {
     expect(out.x).toBe(250)
     expect(out.placement).toBe('above')
   })
+
+  /**
+   * The menu's own rendered rect, given the CSS transform it is placed with:
+   * `translate(-50%, -100%)` when above, `translate(-50%, 0)` when below.
+   * @param out - a placement result.
+   */
+  function menuRect(out: { x: number; y: number; placement: 'above' | 'below' }): {
+    left: number; top: number; right: number; bottom: number
+  } {
+    const left = out.x - MENU_SIZE.width / 2
+    const top = out.placement === 'above' ? out.y - MENU_SIZE.height : out.y
+    return { left, top, right: left + MENU_SIZE.width, bottom: top + MENU_SIZE.height }
+  }
+
+  // The regression: only X used to be clamped, so a selection with no room above
+  // AND none below got a menu past the bottom edge — visible, unclickable. That is
+  // the normal case in a scrollable pane such as the sidebar's file viewer.
+  it.each([
+    ['selection flush at the bottom', { left: 600, top: 780, right: 700, bottom: 795 }],
+    ['selection past the bottom edge', { left: 600, top: 820, right: 700, bottom: 900 }],
+    ['selection above the viewport', { left: 600, top: -120, right: 700, bottom: -100 }],
+    ['selection past the top edge', { left: 600, top: -50, right: 700, bottom: 10 }],
+    ['selection off-screen left', { left: -300, top: 400, right: -200, bottom: 420 }],
+    ['selection off-screen right', { left: 1500, top: 400, right: 1600, bottom: 420 }],
+    ['selection spanning the full height', { left: 100, top: 0, right: 900, bottom: 800 }],
+    ['zero-size selection rect', { left: 0, top: 0, right: 0, bottom: 0 }],
+  ])('keeps the menu inside the viewport: %s', (_name, box) => {
+    const rect = menuRect(menuPosition(box, MENU_SIZE, VIEWPORT))
+    expect(rect.left).toBeGreaterThanOrEqual(0)
+    expect(rect.top).toBeGreaterThanOrEqual(0)
+    expect(rect.right).toBeLessThanOrEqual(VIEWPORT.width)
+    expect(rect.bottom).toBeLessThanOrEqual(VIEWPORT.height)
+  })
+
+  it('stays inside the viewport even before its size is measured', () => {
+    // The first render places a {0,0} menu, so the intermediate frame must be
+    // on-screen too rather than flashing outside it.
+    const rect = menuRect(menuPosition({ left: 600, top: 780, right: 700, bottom: 795 }, { width: 0, height: 0 }, VIEWPORT))
+    expect(rect.top).toBeGreaterThanOrEqual(0)
+    expect(rect.bottom).toBeLessThanOrEqual(VIEWPORT.height)
+  })
+
+  it('keeps the menu inside a short viewport', () => {
+    // A menu as tall as the window must still be reachable.
+    const short = { width: 900, height: 260 }
+    const tall = { width: 200, height: 220 }
+    const rect = menuRect(menuPosition({ left: 400, top: 250, right: 500, bottom: 258 }, tall, short))
+    expect(rect.top).toBeGreaterThanOrEqual(0)
+    expect(rect.bottom).toBeLessThanOrEqual(short.height)
+  })
 })
 
 describe('sourceKindLabel', () => {
