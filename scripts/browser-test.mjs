@@ -198,6 +198,75 @@ try {
         check('REQ1 the card sits inside the composer card', detail.inOverlay && detail.inComposer)
         check('REQ1 the card carries the selected text', detail.text.trim().length > 0, detail.text.slice(0, 40))
 
+        // ---- A long quote: bounded preview, bounded layout, full text kept ----
+        //
+        // The card used to render the verbatim quote inside a ~260px box, so the
+        // browser laid out the whole passage on every re-render — measured at 68k
+        // CSS pixels for a 100-line selection and 14M for a 1.5M-character one —
+        // for a box that can only ever show about thirty characters.
+        const LONG_LINES = 100
+        const longQuote = Array.from({ length: LONG_LINES }, (_, i) =>
+          `第${i + 1}行：用于验证长引文卡片行为的文本内容 ${'x'.repeat(i % 20)}`).join('\n')
+        await page.evaluate(async ({ id, text }) => {
+          await fetch(`/dsh-quote/api/quotes?sessionId=${encodeURIComponent(id)}`, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ quote: { text, sourceKind: 'assistant' } }),
+          })
+        }, { id: activeSessionId, text: longQuote })
+        await page.waitForTimeout(2000)
+
+        const longCard = await page.evaluate(() => {
+          const titles = [...document.querySelectorAll('[data-dsh-quote-rail] .dsh-quote-card-title')]
+          // The long quote is the one whose rendered text is longest.
+          const title = titles.sort((a, b) =>
+            (b.textContent ?? '').length - (a.textContent ?? '').length)[0]
+          const card = title?.closest('[data-quote-id]')
+          return {
+            previewLen: (title?.textContent ?? '').length,
+            scrollWidth: title?.scrollWidth ?? 0,
+            titleAttrLen: (card?.getAttribute('title') ?? '').length,
+          }
+        })
+        check('REQ1 a long quote renders a bounded card preview',
+          longCard.previewLen > 0 && longCard.previewLen <= 300,
+          `${longCard.previewLen} chars (${LONG_LINES}-line quote)`)
+        check('REQ1 the card\'s layout cost does not scale with the quote',
+          longCard.scrollWidth < 5000, `scrollWidth=${longCard.scrollWidth}`)
+        check('REQ1 the full quote stays reachable on the card',
+          longCard.titleAttrLen > longQuote.length - 10,
+          `title=${longCard.titleAttrLen} vs quote=${longQuote.length}`)
+
+        // ---- C: an over-limit quote is refused, with a reason, and not queued ----
+        const refused = await page.evaluate(async (id) => {
+          const res = await fetch(`/dsh-quote/api/quotes?sessionId=${encodeURIComponent(id)}`, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ quote: { text: 'z'.repeat(200_001) } }),
+          })
+          return { status: res.status, body: await res.json() }
+        }, activeSessionId)
+        check('REQ1 the host refuses an over-limit quote', refused.status === 413, `status=${refused.status}`)
+        check('REQ1 the refusal explains the size and the limit',
+          typeof refused.body?.error === 'string' && refused.body.error.includes('200000'),
+          JSON.stringify(refused.body?.error).slice(0, 60))
+
+        // Remove the long quote so the rest of the run addresses only its own.
+        // Waited out fully: the count assertions below compare rail sizes across a
+        // delete, so a cleanup still in flight would look like a card disappearing.
+        await page.evaluate(async (id) => {
+          const list = await (await fetch(`/dsh-quote/api/quotes?sessionId=${encodeURIComponent(id)}`)).json()
+          for (const q of list.quotes) {
+            await fetch(`/dsh-quote/api/quotes?sessionId=${encodeURIComponent(id)}&quoteId=${encodeURIComponent(q.id)}`,
+              { method: 'DELETE' })
+          }
+        }, activeSessionId)
+        await page.waitForFunction(
+          () => document.querySelectorAll('[data-dsh-quote-rail] [data-quote-id]').length === 0,
+          undefined, { timeout: 10_000 },
+        ).catch(() => {})
+        await page.waitForTimeout(400)
+
         // Mark the quote so it is identifiable in the transcript afterwards. The
         // menu staged one already (quotes accumulate and all ride the same turn,
         // ADR-0001); this second one carries the marker the assertions look for.
@@ -226,23 +295,29 @@ try {
         // the host still held the quote — so the user saw no card, staged more
         // quotes, and silently accumulated invisible ones that all rode the next
         // real message.
-        const stagedBefore = await page.evaluate(() =>
-          document.querySelectorAll('[data-dsh-quote-rail] [data-quote-id]').length)
+        // Track the MARKED quote by ID rather than by counting cards: a count can
+        // move for unrelated reasons (a poll landing another quote), while "this
+        // specific submitted quote is still on screen" is exactly the invariant
+        // the deletion must not break.
+        const cardPresent = (quoteId) => page.evaluate((id) =>
+          document.querySelector(`[data-dsh-quote-rail] [data-quote-id="${id}"]`) !== null, quoteId)
+        // Wait for the poll to surface the marked card before measuring, so the
+        // check is about the DELETE rather than about poll timing.
+        await page.waitForFunction((id) =>
+          document.querySelector(`[data-dsh-quote-rail] [data-quote-id="${id}"]`) !== null,
+          injectedId, { timeout: 15_000 }).catch(() => {})
+        const visibleBefore = await cardPresent(injectedId)
         await page.keyboard.press('Backspace')
         await page.waitForTimeout(200)
         // Clear the rest of the draft, then confirm the card survived.
         for (let i = 0; i < 60; i += 1) await page.keyboard.press('Backspace')
         await page.waitForTimeout(1500)
         const afterDelete = await page.evaluate(() => ({
-          rail: document.querySelectorAll('[data-dsh-quote-rail] [data-quote-id]').length,
           draft: document.querySelector('[contenteditable="true"][data-composer-input]')?.textContent ?? '',
         }))
-        // The invariant is that the delete did not REMOVE a card. The count may
-        // legitimately grow between the reads (a poll can land the separately
-        // staged MARKER quote), so assert non-loss rather than equality.
         check('REGRESSION deleting the draft keeps the staged card visible',
-          stagedBefore > 0 && afterDelete.rail >= stagedBefore,
-          `before=${stagedBefore} after=${afterDelete.rail} draft=${JSON.stringify(afterDelete.draft.trim().slice(0, 20))}`)
+          visibleBefore && await cardPresent(injectedId),
+          `before=${visibleBefore} afterDelete=${await cardPresent(injectedId)} draft=${JSON.stringify(afterDelete.draft.trim().slice(0, 20))}`)
 
         // The host must still hold the quote too, or the card is showing a lie.
         const stillStaged = await page.evaluate(async (id) =>

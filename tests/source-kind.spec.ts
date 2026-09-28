@@ -48,9 +48,15 @@ describe('quote delivery', () => {
     expect(buildContextUserMessage(QUOTE).role).toBe('user')
   })
 
-  it('carries the quoted text verbatim as its only content', () => {
+  it('carries the quoted text verbatim inside a frame, as its only content block', () => {
+    // The body is reproduced verbatim so code, diffs and logs keep their shape;
+    // the header is added around it, never mixed into it.
     const message = buildContextUserMessage(QUOTE)
-    expect(message.content).toEqual([{ type: 'text', text: QUOTE.text }])
+    expect(message.content).toHaveLength(1)
+    const only = message.content[0] as { type?: string; text?: string }
+    expect(only.type).toBe('text')
+    expect((only.text ?? '').endsWith(QUOTE.text)).toBe(true)
+    expect(only.text ?? '').toContain('Quoted context')
   })
 
   it('stamps a notice form and a bounded summary the row can show collapsed', () => {

@@ -27,6 +27,7 @@ import type { ReactElement } from 'react'
 
 import type { ChatNodeStoreLike } from './slot-props.ts'
 import { createQuoteApi, type QuoteApi } from './api.ts'
+import { quoteLimitError, quotePreview } from '../quote-text.ts'
 
 /** Selector over the chat snapshot we use to resolve a node key. */
 type ChatNodeStore = ChatNodeStoreLike
@@ -36,6 +37,7 @@ const COPY_LABEL = '复制文本'
 const COPIED_LABEL = '已复制'
 const ADD_LABEL = '添加到对话'
 const REMOVE_LABEL = '移除引用'
+const DISMISS_LABEL = '不再显示'
 /** Shown on a quote card that has been waiting for the user to send. */
 const RAIL_WAITING_HINT = '发送后随你的消息作为上下文'
 /** How long a quote must sit before the rail explains what it is waiting for. */
@@ -244,10 +246,16 @@ export function QuoteRail(props: {
   return (
     <div data-dsh-quote-rail="" className="dsh-quote-rail" role="list">
       {quotes.map((quote) => (
+        // The visible text is a BOUNDED preview and the full quote rides `title`.
+        // Rendering the verbatim text made the browser lay out the whole quote
+        // inside a ~260px box on every re-render — 68k pixels for a typical
+        // 100-line selection, 14M for a 1.5M-character one — for a card that can
+        // only ever show about thirty characters. `title` is what the browser's
+        // own tooltip reads, so nothing is lost.
         <div key={quote.id} data-quote-id={quote.id} className="dsh-quote-card" role="listitem" title={quote.text}>
           <span className="dsh-quote-card-icon"><QuoteGlyph /></span>
           <span className="dsh-quote-card-body">
-            <span className="dsh-quote-card-title">{quote.text}</span>
+            <span className="dsh-quote-card-title">{quotePreview(quote.text)}</span>
             <span className="dsh-quote-card-sub">{hint ?? sourceKindLabel(quote.sourceKind)}</span>
           </span>
           <button
@@ -293,6 +301,33 @@ export function isSubmitKeyEvent(event: {
 }
 
 /**
+ * An explanation for an action the plugin refused, shown in the composer card.
+ *
+ * The plugin owns no modal, so a rejected quote has nowhere else to appear; a
+ * silent no-op would read as a broken menu item. Dismissible and non-blocking: it
+ * reports a refusal, it does not demand acknowledgement.
+ * @param props - the reason to show and its dismissal handler.
+ */
+export function QuoteNotice(props: {
+  message: string
+  onDismiss: () => void
+}): ReactElement {
+  const { message, onDismiss } = props
+  return (
+    <div data-dsh-quote-notice="" className="dsh-quote-notice" role="status">
+      <span className="dsh-quote-notice-text" data-dsh-quote-notice-text="">{message}</span>
+      <button
+        type="button"
+        className="dsh-quote-notice-close"
+        data-dsh-quote-notice-close=""
+        aria-label={DISMISS_LABEL}
+        onClick={onDismiss}
+      >×</button>
+    </div>
+  )
+}
+
+/**
  * The composer overlay entry: hosts the selection listeners, the
  * 「复制文本 / 添加到对话」menu, and the pending-quote rail for this session.
  *
@@ -309,6 +344,13 @@ export function QuoteDock(props: QuoteDockProps): ReactElement | null {
   const [menuSize, setMenuSize] = useState<BoxSize>({ width: 0, height: 0 })
   const [copied, setCopied] = useState(false)
   const [pending, setPending] = useState<readonly RailQuote[]>([])
+  /**
+   * A refusal to explain in the composer, or null.
+   *
+   * The plugin owns no modal, so a rejected action has nowhere else to surface.
+   * Without this the button would look broken.
+   */
+  const [notice, setNotice] = useState<string | null>(null)
   /**
    * The live session id, readable from effects that must not re-subscribe.
    *
@@ -469,16 +511,33 @@ export function QuoteDock(props: QuoteDockProps): ReactElement | null {
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  /**
+   * Queue the selected text as a pending quote.
+   *
+   * An over-long selection is refused HERE as well as on the host, so the user
+   * learns why immediately instead of after a round-trip. The refusal is shown in
+   * the rail's own place rather than in a dialog: the plugin owns no modal, and a
+   * silent no-op would read as a broken button.
+   */
   const addQuote = (candidate: QuoteCandidate): void => {
     setOffer(null)
     window.getSelection?.()?.removeAllRanges()
+    const refusal = quoteLimitError(candidate.text)
+    if (refusal !== null) {
+      setNotice(refusal)
+      return
+    }
     if (sessionId === undefined) {
       console.warn('[dsh-quote] no session id; cannot queue quote')
       return
     }
+    setNotice(null)
     api.add(sessionId, candidate).then(
       () => refreshPending(sessionId),
-      (error) => console.warn('[dsh-quote] queue quote failed:', error),
+      (error) => {
+        console.warn('[dsh-quote] queue quote failed:', error)
+        setNotice(error instanceof Error ? error.message : String(error))
+      },
     )
   }
 
@@ -540,6 +599,9 @@ export function QuoteDock(props: QuoteDockProps): ReactElement | null {
         </div>
       )}
       <QuoteRail quotes={pending} onRemove={removeQuote} />
+      {notice !== null && (
+        <QuoteNotice message={notice} onDismiss={() => setNotice(null)} />
+      )}
     </>
   )
 }

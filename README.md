@@ -18,6 +18,8 @@
 - 发送：卡片**立即消失且不会回来**（即使 agent 正忙、消息只是排队）
 - 语义：一次性、对下一条真实用户消息投递、随即清除；不跨会话、不持久化
 - 转录区：引文显示为一条 **「引用上下文」** 折叠行，折叠时显示有界摘要，点击展开看完整引文
+- 长引文：卡片只渲染有界预览（全文在 tooltip 里）；注入给模型的内容带一行头部说明来源与行数，正文逐字保留
+- 上限：单条引文最多 **200000 字符**，超出会**拒绝并在输入框里说明原因**（不做截断——截断会注入你没选的内容）
 - 命名：`dsh-quote`，菜单文案「添加到对话」
 
 > 引用只在**下一个真正带用户文字**的回合投递。agent 正卡在长工具循环里时，那个回合还没开始，引用会如实等待——**但 composer 里的卡片此时已经随发送消失了**，不会挂在那里。诊断这类问题用 `DSH_QUOTE_TRACE=<文件>`。
@@ -33,8 +35,10 @@
 
 - **client 挂载点**：会话级 slot `conversation.input.overlay`（`src/client/index.tsx` 注册 `QuoteDock`）。该槽渲染在 composer 卡片内部顶端的零高锚点上，所以引用卡片能像附件一样压在输入框里；`conversation.input.dock` 是卡片**上方**的全宽槽位，`conversation.input.attachments` 是被官方图片附件占用的 single 槽，两者都不合适。
 - **选区捕获**：文档层 `mouseup` 捕获监听（`selectionchange` / `scroll` 只负责收起）；选区非空且命中 `[data-chat-flow-key]` 时 → `window.getSelection().toString()` + 行 `data-chat-flow-kind`（`src/client/quote-dock.tsx`）。
-- **静默入队 / 引用卡片**：`QuoteDock` 经自有 HTTP API（`src/client/api.ts`）把引文交给 host；每条待生效引用渲染为一张附件卡片（`data-dsh-quote-rail`），卡片副标题是来源行类型，hover 出移除按钮。
-- **发送即清除（需求 2 的落点）**：按下发送时 `QuoteDock` 把当前所有 staged 引文的 **id 记进 `submittedRef`** 并清空 rail；此后每次轮询结果都先滤掉这些 id。**记住 id 而不是等一个时间窗**，是因为 agent 忙时引用在宿主侧会合法地长时间保持 pending，时间窗一过卡片必然复活。同时 `POST /claim` 让宿主把引用标记为已提交（权威半边），等它不再报告这些 id 后本地记录回收。
+- **静默入队 / 引用卡片**：`QuoteDock` 经自有 HTTP API（`src/client/api.ts`）把引文交给 host；每条待生效引用渲染为一张附件卡片（`data-dsh-quote-rail`），副标题是来源行类型，hover 出移除按钮。卡片标题是**有界预览**（`quotePreview`），全文在 `title` 属性里。
+- **提交即声明（需求 2 的落点）**：`QuoteDock` 在**提交按键**（裸 Enter / 发送按钮）上调用 `POST /claim`，然后**显示宿主报告的状态**。客户端**不**自己决定什么已发送 —— 早期版本用"草稿变空"作为发送信号，无法区分「发送」与「退格删除」，导致删除草稿时卡片永久消失而引文仍被静默注入。
+- **超限拒绝**：`quoteLimitError` 在客户端（即时反馈）与宿主（权威，`413`）各判一次；拒绝原因显示在 composer 卡片内的 `data-dsh-quote-notice` 里。
+- **文本整形（`src/quote-text.ts`）**：零依赖叶子，host 与 client 共用。`quoteSummary`（80，折叠行）/ `quotePreview`（240，卡片）/ `quoteFrame`（模型输入，头部 + 逐字正文）/ `quoteLimitError`（上限）。
 - **投递**：host 端（`src/index.ts`）`agent/pre-step` 一次性折叠（`src/quote-fold.ts`），仅跟随真实用户回合，投递后清空（`src/quote-store.ts`）。引文由 `src/quote-context.ts` 构造成一条带**私有 `source.kind`**（`quote-context`）的 user-role 消息，附 `form: 'notice'` 与有界 `summary`，插在该步最后一条真实用户消息**之前**。
 - **引文行（需求 3 的落点）**：`src/client/quote-row.ts` 注册一个 Conversation definition，认领 `source.kind === 'quote-context'` 的 append-surface `user/message` 事件，产出 `quote` 节点；`src/client/quote-row-view.tsx` 作为 `conversation.chat.node` 的 `key: 'quote'` 渲染器，画成「引用上下文」+ 摘要的可展开行。
   - **为什么可行**：`isVisibleChatNode` 是 **kind 黑名单**（只排 `system-prompt` / `context` / permission command），自定义 kind 默认可见；`ChatNodeDataMap` 是公开的插件合并面；`ctx.uiConversation.events.register` 是官方自用的注册口。

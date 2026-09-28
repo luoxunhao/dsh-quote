@@ -29,6 +29,7 @@ import { QuoteStore } from './quote-store.ts'
 import { foldPendingQuotes } from './quote-fold.ts'
 import type { PendingQuote } from './quote-store.ts'
 import { contextMessageFactory } from './quote-context.ts'
+import { quoteLimitError } from './quote-text.ts'
 
 /** Plugin identity for cordis.yml rows. */
 export const name = 'dsh-quote'
@@ -119,6 +120,16 @@ export function apply(ctx: Context): void {
       if (url.pathname.endsWith('/quotes') && method === 'PUT') {
         if (quote?.quote?.text === undefined || typeof quote.quote.text !== 'string') {
           writeJson(response, 400, { ok: false, error: 'bad quote' })
+          return
+        }
+        // Refuse an over-long quote rather than truncating it: the queue is the
+        // context's own budget, and silently injecting part of what the user
+        // selected would inject a passage they never chose. The client checks the
+        // same rule for immediate feedback; this is the authoritative half.
+        const tooLong = quoteLimitError(quote.quote.text)
+        if (tooLong !== null) {
+          trace({ ev: 'quote-rejected', sessionId, chars: quote.quote.text.length })
+          writeJson(response, 413, { ok: false, error: tooLong })
           return
         }
         const added = store.add(sessionId, quote.quote.text, {

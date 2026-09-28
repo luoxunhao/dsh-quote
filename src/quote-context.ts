@@ -17,8 +17,11 @@
  * `quote` node — a kind outside the visibility blacklist, rendered by this
  * plugin's own `conversation.chat.node` seat. See ADR-0004.
  *
- * The `form: 'notice'` + `summary` pair mirrors how the host presents its own
- * injected-context rows: a one-line account that expands to the full text.
+ * The body is FRAMED rather than sent bare: a quote arrives as one message out of
+ * nowhere, so without a header the model cannot tell an excerpt from an
+ * instruction or know how long the passage is. The text shaping lives in the
+ * zero-dependency `quote-text.ts` leaf so the composer card can bound its own
+ * rendering with the same rules.
  * @module dsh-quote/quote-context
  */
 
@@ -28,6 +31,9 @@ import type { UserMessage, ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { PendingQuote } from './quote-store.ts'
 import type { QuoteContextFactory } from './quote-fold.ts'
 import { QUOTE_CONTEXT_KIND } from './source-kind.ts'
+import { quoteFrame, quoteSummary } from './quote-text.ts'
+
+export { quoteSummary, quoteLineCount, quoteLimitError } from './quote-text.ts'
 
 /**
  * Durable attribution for one quote this plugin injected into the conversation.
@@ -50,33 +56,25 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 
-/** Longest summary kept on the collapsed row. */
-const SUMMARY_LIMIT = 80
-
-/**
- * Build the one-line summary shown on the collapsed quote row.
- *
- * Flattens the quote to a single line and bounds it, so the row stays one line
- * high no matter how much text the user selected.
- * @param text - the quoted text, verbatim.
- * @returns a bounded single-line summary.
- */
-export function quoteSummary(text: string): string {
-  const flat = text.replace(/\s+/g, ' ').trim()
-  return flat.length <= SUMMARY_LIMIT ? flat : `${flat.slice(0, SUMMARY_LIMIT - 1)}…`
-}
-
 /**
  * Build one plugin-sourced message carrying the quoted text.
  *
  * `source.kind` is this plugin's own kind — the join the client half matches on.
- * The full quote travels as message content, so the model reads the whole
- * selection while the row shows only the bounded summary.
+ * The content is the FRAMED quote, so the model learns what the block is and
+ * where it came from before reading it. The `summary` stays a separate, harder-
+ * bounded field because the collapsed row shows it inside one line; deriving it
+ * from the frame would put the header text on the row.
  * @param quote - a pending quote.
  * @returns the immutable model-visible message.
  */
 export function buildContextUserMessage(quote: PendingQuote): UserMessage {
-  const content: ContentBlock[] = [{ type: 'text', text: quote.text }]
+  const content: ContentBlock[] = [{
+    type: 'text',
+    text: quoteFrame({
+      text: quote.text,
+      ...(quote.sourceKind !== undefined ? { sourceLabel: quote.sourceKind } : {}),
+    }),
+  }]
   return createUserMessage({
     content,
     source: {

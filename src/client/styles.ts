@@ -164,6 +164,55 @@ const CSS = `
   color: var(--dsw-alias-label-primary);
 }
 
+/* Refusal notice: reports why a quote was not accepted, in the composer card
+   where the action was taken. Non-blocking and dismissible. */
+[data-dsh-quote-notice] {
+  position: absolute;
+  top: ${RAIL_INSET}px;
+  left: ${RAIL_SIDE_INSET}px;
+  right: ${RAIL_SIDE_INSET}px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--dsw-alias-border-l2, #3a3a3a);
+  border-left: 2px solid var(--dsw-alias-label-caption, #c46a3a);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+/* Room for the notice, only while it is up and no rail already claims the slot. */
+[data-composer-card]:has([data-dsh-quote-notice]):not(:has([data-dsh-quote-rail])) {
+  padding-top: ${RAIL_INSET + CARD_HEIGHT + RAIL_INSET}px;
+}
+[data-dsh-quote-notice] .dsh-quote-notice-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+[data-dsh-quote-notice] .dsh-quote-notice-close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+[data-dsh-quote-notice] .dsh-quote-notice-close:hover {
+  background: var(--dsw-alias-bg-layer-2, rgba(128, 128, 128, 0.2));
+  color: var(--dsw-alias-label-primary);
+}
+
 /* Visible quote row in the transcript: a compact injected-context line, styled
    to read as "something put into context" rather than as a user bubble. */
 [data-dsh-quote-row] {
