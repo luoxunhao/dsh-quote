@@ -12,7 +12,7 @@ import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createElement } from 'react'
 
-import { QuoteRail, isSubmitKeyEvent, menuPosition, sourceKindLabel } from '../src/client/quote-dock.tsx'
+import { QuoteRail, isSubmitKeyEvent, menuPosition, railSourceLabel, sourceKindLabel } from '../src/client/quote-dock.tsx'
 
 const VIEWPORT = { width: 1200, height: 800 }
 const MENU_SIZE = { width: 160, height: 32 }
@@ -117,6 +117,33 @@ describe('QuoteRail', () => {
       onRemove: () => {},
     }))
     expect(html).not.toContain('回合进行中')
+  })
+})
+
+describe('railSourceLabel', () => {
+  it('shows the FILE name when the quote came out of a file', () => {
+    // The user needs to see WHICH file a passage came from; a generic row label
+    // would hide exactly that.
+    expect(railSourceLabel({ filePath: 'E:\\project\\dsh\\dsh-quote\\src\\api.ts' })).toBe('api.ts')
+    expect(railSourceLabel({ filePath: '/home/me/proj/README.md' })).toBe('README.md')
+  })
+
+  it('prefers the file over the row kind, which carries less information', () => {
+    expect(railSourceLabel({ filePath: 'E:\\p\\a.ts', sourceKind: 'assistant' })).toBe('a.ts')
+  })
+
+  it('falls back to the row kind when the quote did not come from a file', () => {
+    expect(railSourceLabel({ sourceKind: 'tool' })).toBe('工具输出')
+    expect(railSourceLabel({})).toBe('选中的文本')
+  })
+
+  it('ignores a blank file path rather than rendering an empty subtitle', () => {
+    expect(railSourceLabel({ filePath: '   ', sourceKind: 'user' })).toBe('用户消息')
+    expect(railSourceLabel({ filePath: '' })).toBe('选中的文本')
+  })
+
+  it('tolerates a path with no trailing segment', () => {
+    expect(railSourceLabel({ filePath: 'E:\\' })).toBe('E:')
   })
 })
 

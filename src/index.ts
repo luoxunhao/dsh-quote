@@ -139,6 +139,9 @@ export function apply(ctx: Context): void {
           ...(typeof quote.quote.sourceKind === 'string'
             ? { sourceKind: quote.quote.sourceKind }
             : {}),
+          ...(typeof quote.quote.filePath === 'string' && quote.quote.filePath !== ''
+            ? { filePath: quote.quote.filePath }
+            : {}),
         })
         writeJson(response, 200, { quote: added })
         return

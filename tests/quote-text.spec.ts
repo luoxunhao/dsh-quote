@@ -105,6 +105,34 @@ describe('quoteFrame (what the model reads)', () => {
     expect(quoteFrame({ text: 'x', sourceLabel: '   ' })).not.toContain('from')
   })
 
+  it('names the FILE when the quote came out of one', () => {
+    // A path is the more specific fact: it lets the model re-read the file, cite
+    // it, or ask about the rest of it.
+    const frame = quoteFrame({ text: 'x', filePath: 'E:\\proj\\src\\api.ts' })
+    expect(frame).toContain('from file E:\\proj\\src\\api.ts')
+  })
+
+  it('prefers the file path over the row kind, which would only repeat it', () => {
+    const frame = quoteFrame({ text: 'x', filePath: 'E:\\proj\\src\\api.ts', sourceLabel: 'assistant' })
+    expect(frame).toContain('from file E:\\proj\\src\\api.ts')
+    expect(frame).not.toContain('from assistant')
+  })
+
+  it('falls back to the row kind when there is no file', () => {
+    expect(quoteFrame({ text: 'x', sourceLabel: 'assistant' })).toContain('from assistant')
+  })
+
+  it('ignores a blank file path rather than emitting an empty origin', () => {
+    expect(quoteFrame({ text: 'x', filePath: '   ', sourceLabel: 'assistant' })).toContain('from assistant')
+    expect(quoteFrame({ text: 'x', filePath: '' })).toContain('Quoted context (1 line) follows.')
+  })
+
+  it('bounds a very long path so a path cannot flood the header', () => {
+    const frame = quoteFrame({ text: 'x', filePath: `E:\\${'d'.repeat(5000)}\\f.ts` })
+    const header = frame.split('\n')[0] ?? ''
+    expect(header.length).toBeLessThan(600)
+  })
+
   it('bounds a long source label so a label cannot flood the header', () => {
     const frame = quoteFrame({ text: 'x', sourceLabel: 's'.repeat(5000) })
     const header = frame.split('\n')[0] ?? ''

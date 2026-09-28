@@ -23,10 +23,12 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { ReactElement } from 'react'
 
 import type { ChatNodeStoreLike } from './slot-props.ts'
 import { createQuoteApi, type QuoteApi } from './api.ts'
+import { fileSourceFromAnchor } from './file-source.ts'
 import { quoteLimitError, quotePreview } from '../quote-text.ts'
 
 /** Selector over the chat snapshot we use to resolve a node key. */
@@ -45,7 +47,7 @@ const RAIL_WAITING_MS = 3000
 /** Gap between the selection and the menu, and between the menu and a viewport edge. */
 const MENU_OFFSET = 8
 
-/** One resolved quote candidate from a selection over a chat row. */
+/** One resolved quote candidate from a selection in the conversation or a file. */
 export interface QuoteCandidate {
   /** The selected plain text (verbatim rendered text). */
   text: string
@@ -53,6 +55,11 @@ export interface QuoteCandidate {
   sourceKind?: string
   /** The durable source message id, when the selection resolves to a finalized message. */
   sourceMessageId?: string
+  /**
+   * The absolute path of the file the selection was made in, when it came from a
+   * sidebar file preview. Travels with the quote so the model learns its origin.
+   */
+  filePath?: string
 }
 
 /** A viewport rectangle, as returned by `Range.getBoundingClientRect`. */
@@ -87,6 +94,8 @@ export interface RailQuote {
   text: string
   /** The source row kind the selection came from, when captured. */
   sourceKind?: string
+  /** The absolute file path the selection came from, when it came from a file. */
+  filePath?: string
 }
 
 export interface QuoteDockProps {
@@ -119,6 +128,24 @@ export function sourceKindLabel(kind?: string): string {
 }
 
 /**
+ * Name the source of a quote for the card's subtitle.
+ *
+ * A file path is the more specific fact and wins over the row kind: the user
+ * needs to see WHICH file a passage came out of, and a generic label would hide
+ * exactly that. Only the last path segment is shown — the full path lives in the
+ * card's own tooltip, and a subtitle is one line.
+ * @param quote - the staged quote.
+ */
+export function railSourceLabel(quote: { sourceKind?: string; filePath?: string }): string {
+  const path = quote.filePath
+  if (typeof path === 'string' && path.trim() !== '') {
+    const segments = path.split(/[\\/]/).filter(s => s !== '')
+    return segments.at(-1) ?? path
+  }
+  return sourceKindLabel(quote.sourceKind)
+}
+
+/**
  * Place the selection menu: centered on the selection's horizontal midpoint,
  * above it when there is room and below it otherwise, clamped so a measured
  * menu never leaves the viewport.
@@ -139,10 +166,19 @@ export function menuPosition(box: ClientBox, size: BoxSize, viewport: BoxSize): 
 }
 
 /**
- * Resolve a text selection over a chat row into a quote candidate: the selected
- * text plus, when resolvable, its row kind and finalized message id. Returns
- * undefined when the selection is empty or its anchor is not inside a chat flow
- * row (`[data-chat-flow-key]`).
+ * Resolve a text selection into a quote candidate.
+ *
+ * Two anchors are recognized, and which one applies is decided by the selection's
+ * ANCHOR (where the drag started), so a selection that spans a boundary is
+ * attributed to the surface the user began in:
+ *
+ * - a chat transcript row (`[data-chat-flow-key]`) — carries the row kind and,
+ *   when resolvable, the finalized message id;
+ * - a sidebar file preview (`[data-textpreview-url]`) — carries the file's
+ *   absolute path, so the model learns which file the passage came from.
+ *
+ * Returns undefined when the selection is empty or starts in neither, which is
+ * what keeps unrelated panels quiet.
  *
  * The selection is read from the live `window` selection (rendered text, verbatim
  * — per ADR-0001 we ingest what the user sees, not reconstructed markdown).
@@ -158,9 +194,16 @@ export function quoteFromSelection(
   const text = selectionText.trim()
   if (text === '') return undefined
   if (!(anchorNode instanceof Node)) return undefined
-  const row = anchorNode.parentElement?.closest(FLOW_KEY_ATTR) ?? (
-    anchorNode instanceof Element ? anchorNode.closest(FLOW_KEY_ATTR) : null
-  )
+  const anchor = anchorNode instanceof Element ? anchorNode : anchorNode.parentElement
+
+  // A sidebar file selection wins when the anchor is inside one, because the row
+  // lookup below cannot match a preview and the file is the more specific fact.
+  const file = fileSourceFromAnchor(anchorNode)
+  if (file !== undefined) {
+    return { text, filePath: file.path }
+  }
+
+  const row = anchorNode.parentElement?.closest(FLOW_KEY_ATTR) ?? anchor?.closest(FLOW_KEY_ATTR)
   if (!(row instanceof HTMLElement)) return undefined
   const key = row.dataset.chatFlowKey
   const kind = row.dataset.chatFlowKind
@@ -256,7 +299,7 @@ export function QuoteRail(props: {
           <span className="dsh-quote-card-icon"><QuoteGlyph /></span>
           <span className="dsh-quote-card-body">
             <span className="dsh-quote-card-title">{quotePreview(quote.text)}</span>
-            <span className="dsh-quote-card-sub">{hint ?? sourceKindLabel(quote.sourceKind)}</span>
+            <span className="dsh-quote-card-sub">{hint ?? railSourceLabel(quote)}</span>
           </span>
           <button
             type="button"
@@ -532,7 +575,12 @@ export function QuoteDock(props: QuoteDockProps): ReactElement | null {
       return
     }
     setNotice(null)
-    api.add(sessionId, candidate).then(
+    api.add(sessionId, {
+      text: candidate.text,
+      ...(candidate.sourceMessageId !== undefined ? { sourceMessageId: candidate.sourceMessageId } : {}),
+      ...(candidate.sourceKind !== undefined ? { sourceKind: candidate.sourceKind } : {}),
+      ...(candidate.filePath !== undefined ? { filePath: candidate.filePath } : {}),
+    }).then(
       () => refreshPending(sessionId),
       (error) => {
         console.warn('[dsh-quote] queue quote failed:', error)
@@ -569,7 +617,12 @@ export function QuoteDock(props: QuoteDockProps): ReactElement | null {
 
   return (
     <>
-      {offer !== null && position !== undefined && (
+      {offer !== null && position !== undefined && createPortal(
+        // The menu is PORTALED to <body> rather than rendered in place. It used to
+        // sit inside the composer card, and a z-index cannot lift a child out of
+        // its ancestor's stacking context — so when the right sidebar opened over
+        // the composer, the panel intercepted every click on the menu and a
+        // selection made in a sidebar file could not be quoted at all.
         <div
           ref={measureMenu}
           data-dsh-quote-offer=""
@@ -596,7 +649,8 @@ export function QuoteDock(props: QuoteDockProps): ReactElement | null {
             <QuoteGlyph />
             {ADD_LABEL}
           </button>
-        </div>
+        </div>,
+        document.body,
       )}
       <QuoteRail quotes={pending} onRemove={removeQuote} />
       {notice !== null && (

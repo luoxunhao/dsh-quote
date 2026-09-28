@@ -27,6 +27,11 @@ export interface PendingQuote {
   /** The source row kind the selection came from (assistant / user / tool / …). */
   readonly sourceKind?: string
   /**
+   * Absolute path of the file the selection was made in, when it came from a
+   * sidebar file preview. Travels with the quote so the model learns its origin.
+   */
+  readonly filePath?: string
+  /**
    * Set once the user has sent the message this quote rides. A claimed quote is
    * still queued — the fold has yet to inject it — but the composer stops showing
    * it as a removable draft, because it belongs to a message already sent.
@@ -53,19 +58,20 @@ export class QuoteStore {
    * Add one pending quote to a session's queue.
    * @param sessionId - the owning session.
    * @param text - the selected text (verbatim).
-   * @param meta - optional provenance (source message id / kind).
+   * @param meta - optional provenance (source message id / kind / file path).
    * @returns the added quote, with its generated id.
    */
   add(
     sessionId: string,
     text: string,
-    meta: { sourceMessageId?: string; sourceKind?: string } = {},
+    meta: { sourceMessageId?: string; sourceKind?: string; filePath?: string } = {},
   ): PendingQuote {
     const quote: PendingQuote = {
       id: newQuoteId(),
       text,
       ...(meta.sourceMessageId !== undefined ? { sourceMessageId: meta.sourceMessageId } : {}),
       ...(meta.sourceKind !== undefined ? { sourceKind: meta.sourceKind } : {}),
+      ...(meta.filePath !== undefined ? { filePath: meta.filePath } : {}),
     }
     const list = this.bySession.get(sessionId) ?? []
     list.push(quote)

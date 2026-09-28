@@ -15,6 +15,8 @@ export interface PendingQuote {
   readonly sourceMessageId?: string
   /** The source row kind the selection came from (assistant / user / tool / …). */
   readonly sourceKind?: string
+  /** Absolute path of the file the selection came from, when it came from a file. */
+  readonly filePath?: string
 }
 
 /** A failed quotes call: HTTP status plus the host's message. */
@@ -33,7 +35,7 @@ export interface QuoteApi {
   /** List a session's still-staged quotes (in insertion order). */
   list(sessionId: string): Promise<readonly PendingQuote[]>
   /** Add one pending quote to a session; resolves with the stored quote. */
-  add(sessionId: string, quote: { text: string; sourceMessageId?: string; sourceKind?: string }): Promise<PendingQuote>
+  add(sessionId: string, quote: { text: string; sourceMessageId?: string; sourceKind?: string; filePath?: string }): Promise<PendingQuote>
   /** Remove one pending quote by id; true when it existed. */
   remove(sessionId: string, quoteId: string): Promise<boolean>
   /**

@@ -73,6 +73,7 @@ export function buildContextUserMessage(quote: PendingQuote): UserMessage {
     text: quoteFrame({
       text: quote.text,
       ...(quote.sourceKind !== undefined ? { sourceLabel: quote.sourceKind } : {}),
+      ...(quote.filePath !== undefined ? { filePath: quote.filePath } : {}),
     }),
   }]
   return createUserMessage({

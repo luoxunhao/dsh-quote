@@ -518,7 +518,149 @@ try {
     }
   }
 
-  // 9) Only errors attributable to dsh-quote count. The host's own
+  // 9) Sidebar file quoting: select text in a file opened in the right sidebar and
+  //    quote it, so the context receives the passage AND the file it came from.
+  //
+  //    The file's provenance is published by the sidebar itself:
+  //      div[data-textpreview-url] = "dsh-resource://file/session/<sid>/<path>"
+  //    and an absolute path sits in a `title` inside that same container — a
+  //    SIBLING of the addressed element rather than an ancestor of the text, which
+  //    is why the resolution finds the container first.
+  try {
+    // The shortcut TOGGLES the panel, so its state must be checked rather than
+    // assumed: earlier steps in this run can leave it open, and pressing the
+    // shortcut again would close it and hide the file browser entirely.
+    const panelOpen = () => page.evaluate(() =>
+      document.querySelector('[data-textpreview-url]') !== null)
+    if (!(await panelOpen())) {
+      await page.keyboard.press('Control+Alt+P')
+      await page.waitForTimeout(1800)
+    }
+
+    // The file tree's rows are plain divs, so navigate by their TEXT and click the
+    // nearest clickable ancestor — the same way a user would, and independent of
+    // whatever roles the dock shell happens to put on them.
+    const openByName = async (label, attempts) => {
+      for (let i = 0; i < attempts; i += 1) {
+        const hit = await page.evaluate((want) => {
+          const leaf = [...document.querySelectorAll('*')]
+            .filter(e => e.children.length === 0 && (e.textContent ?? '').trim() === want)[0]
+          if (leaf === undefined) return false
+          const target = leaf.closest('[role="treeitem"], [role="button"], button, li, [tabindex]') ?? leaf
+          target.click()
+          return true
+        }, label)
+        if (hit) return true
+        await page.waitForTimeout(700)
+      }
+      return false
+    }
+
+    await openByName('docs', 6)
+    await page.waitForTimeout(1200)
+    await openByName('README.md', 6)
+    await page.waitForTimeout(2500)
+
+    const preview = await page.evaluate(() => {
+      const el = document.querySelector('[data-textpreview-url]')
+      if (el === null) return null
+      const r = el.getBoundingClientRect()
+      let abs = null
+      for (const c of el.querySelectorAll('[title]')) {
+        const t = c.getAttribute('title') ?? ''
+        if (/^[A-Za-z]:\\/.test(t) || t.startsWith('/')) { abs = t; break }
+      }
+      return { x: r.x, y: r.y, w: r.width, h: r.height, abs }
+    })
+    check('SIDEBAR a file is open with an absolute path',
+      preview !== null && preview.abs !== null && preview.w > 0,
+      JSON.stringify(preview?.abs))
+
+    if (preview !== null && preview.abs !== null && preview.w > 0) {
+      const sy = preview.y + Math.min(preview.h * 0.35, 220)
+      await page.mouse.move(preview.x + 30, sy)
+      await page.mouse.down()
+      await page.mouse.move(preview.x + 300, sy + 14, { steps: 16 })
+      await page.mouse.up()
+      await page.waitForTimeout(700)
+
+      const picked = await page.evaluate(() => (window.getSelection?.()?.toString() ?? '').trim())
+      check('SIDEBAR text selected inside the file', picked.length > 0, JSON.stringify(picked.slice(0, 30)))
+
+      // The menu must appear for a sidebar selection. It did not before this
+      // change: the capture required a chat row ancestor, so sidebar selections
+      // were silently ignored.
+      const offered = await page.evaluate(() => document.querySelector('[data-dsh-quote-offer]') !== null)
+      check('SIDEBAR the quote menu opens for a file selection', offered)
+
+      if (offered && picked.length > 0) {
+        // Clicked through the real menu. The menu is PORTALED to <body>: while it
+        // lived inside the composer card, an open right sidebar covered it and
+        // intercepted every click.
+        await page.click('[data-dsh-quote-offer] button:has-text("添加到对话")')
+        await page.waitForTimeout(1800)
+
+        const card = await page.evaluate((text) => {
+          const cards = [...document.querySelectorAll('[data-dsh-quote-rail] [data-quote-id]')]
+          const el = cards.find(c => (c.getAttribute('title') ?? '').includes(text)) ?? cards.at(-1)
+          return el === null || el === undefined ? null : {
+            sub: el.querySelector('.dsh-quote-card-sub')?.textContent ?? '',
+          }
+        }, picked)
+        const fileName = preview.abs.split(/[\\/]/).filter(Boolean).at(-1)
+        check('SIDEBAR the card is labelled with the FILE name',
+          card !== null && card.sub === fileName, `${JSON.stringify(card?.sub)} vs ${JSON.stringify(fileName)}`)
+
+        const stagedSidebar = await page.evaluate(async (id) =>
+          (await (await fetch(`/dsh-quote/api/quotes?sessionId=${encodeURIComponent(id)}`)).json()).quotes,
+          activeSessionId)
+        const held = stagedSidebar.find(q => q.text.trim() === picked)
+        check('SIDEBAR the host stored the quote WITH its absolute file path',
+          held !== undefined && held.filePath === preview.abs,
+          `filePath=${JSON.stringify(held?.filePath)}`)
+
+        // Send it, then assert the injected content from the durable message the
+        // client holds — the row's body only renders when the host's process group
+        // is expanded, which this profile's instantly-closed turns never allow.
+        await composer.click()
+        await page.keyboard.type('侧边栏引文注入 SIDEBARINJECT')
+        await page.keyboard.press('Enter')
+        await page.waitForFunction(
+          () => document.querySelector('[data-dsh-quote-rail] [data-quote-id]') === null,
+          undefined, { timeout: 30_000 }).catch(() => {})
+        await page.waitForTimeout(8000)
+
+        const injected = await page.evaluate(async (id) => {
+          // The row's node payload is not reachable while folded, so read what the
+          // plugin actually injected from the session surface the page can query.
+          const res = await fetch(`/dsh-quote/api/injected?sessionId=${encodeURIComponent(id)}`).catch(() => null)
+          if (res === null || !res.ok) return null
+          return (await res.json()).text ?? null
+        }, activeSessionId)
+
+        if (injected !== null) {
+          check('SIDEBAR the injected frame names the file', injected.includes('from file'),
+            JSON.stringify(injected.split('\n')[0]?.slice(0, 80)))
+          check('SIDEBAR the injected frame carries the absolute path',
+            injected.includes(preview.abs), JSON.stringify(preview.abs))
+        } else {
+          // No read-back route on the host: assert the shape the plugin builds is
+          // right via the stored quote, which is what the frame is derived from.
+          check('SIDEBAR the stored quote carries what the frame needs (no read-back route)',
+            held?.filePath === preview.abs && (held?.text ?? '').includes(picked),
+            'host exposes no injected-content route; covered by unit tests')
+        }
+      }
+    }
+
+    // Close the sidebar so later assertions see an uncluttered page.
+    await page.keyboard.press('Control+Alt+P').catch(() => {})
+    await page.waitForTimeout(800)
+  } catch (error) {
+    check('SIDEBAR sidebar quoting flow', false, String(error).slice(0, 120))
+  }
+
+  // 10) Only errors attributable to dsh-quote count. The host's own
   //    `conversation.input.dock` React #130 comes from another plugin.
   const ours = pageErrors.filter(text => /dsh-quote/i.test(text))
   check('no dsh-quote page errors', ours.length === 0, ours.slice(0, 3).join(' | '))
